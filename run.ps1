@@ -19,7 +19,8 @@ param(
     [switch]$Force,
     [switch]$NoBrowser,
     [switch]$CreateShortcut,
-    [switch]$Reset
+    [switch]$Reset,
+    [switch]$ResetToken
 )
 
 $ErrorActionPreference = 'Stop'
@@ -30,13 +31,14 @@ if (-not (Test-Path -Path $appDataDir)) {
     New-Item -ItemType Directory -Path $appDataDir -Force | Out-Null
 }
 
-$configFile  = Join-Path -Path $appDataDir -ChildPath "config.json"
-$tokenFile   = Join-Path -Path $appDataDir -ChildPath "token.enc"
-$historyFile = Join-Path -Path $appDataDir -ChildPath "stats-history.json"
-$yearlyFile  = Join-Path -Path $appDataDir -ChildPath "yearly-traffic.json"
-$reportFile  = Join-Path -Path $appDataDir -ChildPath "dashboard.html"
-$avatarIco   = Join-Path -Path $appDataDir -ChildPath "avatar.ico"
-$launcherPs1 = Join-Path -Path $appDataDir -ChildPath "launcher.ps1"
+$configFile     = Join-Path -Path $appDataDir -ChildPath "config.json"
+$tokenFile      = Join-Path -Path $appDataDir -ChildPath "token.enc"
+$historyFile    = Join-Path -Path $appDataDir -ChildPath "stats-history.json"
+$yearlyFile     = Join-Path -Path $appDataDir -ChildPath "yearly-traffic.json"
+$reportFile     = Join-Path -Path $appDataDir -ChildPath "dashboard.html"
+$avatarIco      = Join-Path -Path $appDataDir -ChildPath "avatar.ico"
+$launcherPs1    = Join-Path -Path $appDataDir -ChildPath "launcher.ps1"
+$migratedMarker = Join-Path -Path $appDataDir -ChildPath ".migrated"
 
 Write-Host ""
 Write-Host "   ======================================================" -ForegroundColor Cyan
@@ -44,12 +46,23 @@ Write-Host "            GitMyRate - Audience, Radar & Vitals         " -Foregrou
 Write-Host "   ======================================================" -ForegroundColor Cyan
 Write-Host ""
 
+# Handle --ResetToken switch
+if ($ResetToken) {
+    if (Test-Path $tokenFile) {
+        Remove-Item $tokenFile -Force -ErrorAction SilentlyContinue
+    }
+    Write-Host "  [+] Stored GitHub token removed. You will be prompted for a new token." -ForegroundColor Green
+}
+
 # Handle --Reset switch
 if ($Reset) {
-    Write-Host "  [*] Resetting GitMyRate local configuration and credentials..." -ForegroundColor Yellow
-    if (Test-Path $tokenFile) { Remove-Item $tokenFile -Force }
-    if (Test-Path $configFile) { Remove-Item $configFile -Force }
-    Write-Host "  [+] Reset complete." -ForegroundColor Green
+    Write-Host "  [*] Wiping all GitMyRate local cache, history, and credentials..." -ForegroundColor Yellow
+    if (Test-Path $appDataDir) {
+        Remove-Item "$appDataDir\*" -Recurse -Force -ErrorAction SilentlyContinue
+    }
+    # Create migrated marker so it doesn't auto-resurrect old deleted credentials
+    Set-Content -Path $migratedMarker -Value "migrated" -Encoding UTF8
+    Write-Host "  [+] GitMyRate cache completely wiped from $appDataDir." -ForegroundColor Green
     return
 }
 
@@ -63,39 +76,42 @@ if (Test-Path -Path $configFile) {
     }
 }
 
-# Auto-discover existing local dashboard data (Desktop migration)
-$possibleLegacyDirs = @(
-    (Get-Location).Path,
-    (Join-Path ([Environment]::GetFolderPath("Desktop")) "TalviFox Dashboard"),
-    (Join-Path $env:USERPROFILE "Desktop\TalviFox Dashboard")
-) | Select-Object -Unique
+# Auto-discover existing local dashboard data (Desktop migration - ONE TIME ONLY)
+if (-not (Test-Path -Path $migratedMarker) -and -not (Test-Path -Path $configFile)) {
+    $possibleLegacyDirs = @(
+        (Get-Location).Path,
+        (Join-Path ([Environment]::GetFolderPath("Desktop")) "TalviFox Dashboard"),
+        (Join-Path $env:USERPROFILE "Desktop\TalviFox Dashboard")
+    ) | Select-Object -Unique
 
-foreach ($ld in $possibleLegacyDirs) {
-    if (Test-Path $ld) {
-        # Check for legacy token
-        $legToken = Join-Path $ld "github-token.txt"
-        if ((Test-Path $legToken) -and (-not (Test-Path $tokenFile))) {
-            $rawToken = (Get-Content $legToken -Raw).Trim()
-            if (-not [string]::IsNullOrWhiteSpace($rawToken)) {
-                $sec = ConvertTo-SecureString $rawToken -AsPlainText -Force
-                $enc = ConvertFrom-SecureString $sec
-                Set-Content -Path $tokenFile -Value $enc -Encoding UTF8
-                Write-Host "  [+] Discovered and encrypted existing GitHub token from '$ld'." -ForegroundColor Green
+    foreach ($ld in $possibleLegacyDirs) {
+        if (Test-Path $ld) {
+            # Check for legacy token
+            $legToken = Join-Path $ld "github-token.txt"
+            if ((Test-Path $legToken) -and (-not (Test-Path $tokenFile))) {
+                $rawToken = (Get-Content $legToken -Raw).Trim()
+                if (-not [string]::IsNullOrWhiteSpace($rawToken)) {
+                    $sec = ConvertTo-SecureString $rawToken -AsPlainText -Force
+                    $enc = ConvertFrom-SecureString $sec
+                    Set-Content -Path $tokenFile -Value $enc -Encoding UTF8
+                    Write-Host "  [+] Discovered and encrypted existing GitHub token from '$ld'." -ForegroundColor Green
+                }
+            }
+            # Check for history
+            $legHist = Join-Path $ld "stats-history.json"
+            if ((Test-Path $legHist) -and (-not (Test-Path $historyFile))) {
+                Copy-Item $legHist $historyFile -Force
+                Write-Host "  [+] Migrated historical stats-history.json into GitMyRate." -ForegroundColor Green
+            }
+            # Check for yearly traffic
+            $legYear = Join-Path $ld "yearly-traffic.json"
+            if ((Test-Path $legYear) -and (-not (Test-Path $yearlyFile))) {
+                Copy-Item $legYear $yearlyFile -Force
+                Write-Host "  [+] Migrated yearly-traffic.json archive into GitMyRate." -ForegroundColor Green
             }
         }
-        # Check for history
-        $legHist = Join-Path $ld "stats-history.json"
-        if ((Test-Path $legHist) -and (-not (Test-Path $historyFile))) {
-            Copy-Item $legHist $historyFile -Force
-            Write-Host "  [+] Migrated historical stats-history.json into GitMyRate." -ForegroundColor Green
-        }
-        # Check for yearly traffic
-        $legYear = Join-Path $ld "yearly-traffic.json"
-        if ((Test-Path $legYear) -and (-not (Test-Path $yearlyFile))) {
-            Copy-Item $legYear $yearlyFile -Force
-            Write-Host "  [+] Migrated yearly-traffic.json archive into GitMyRate." -ForegroundColor Green
-        }
     }
+    Set-Content -Path $migratedMarker -Value "migrated" -Encoding UTF8
 }
 
 # Determine GitHub Username
@@ -128,6 +144,12 @@ $config | ConvertTo-Json | Set-Content -Path $configFile -Encoding UTF8
 $resolvedToken = ""
 if (-not [string]::IsNullOrWhiteSpace($Token)) {
     $resolvedToken = $Token
+    try {
+        $sec = ConvertTo-SecureString $resolvedToken -AsPlainText -Force
+        $enc = ConvertFrom-SecureString $sec
+        Set-Content -Path $tokenFile -Value $enc -Encoding UTF8
+        Write-Host "  [+] New token encrypted and saved to Windows DPAPI storage." -ForegroundColor Green
+    } catch {}
 } elseif (Test-Path -Path $tokenFile) {
     try {
         $enc = Get-Content -Path $tokenFile -Raw
@@ -139,40 +161,28 @@ if (-not [string]::IsNullOrWhiteSpace($Token)) {
         Write-Host "  [!] Could not decrypt saved token. Continuing in public mode." -ForegroundColor DarkYellow
     }
 } else {
-    # Check if user has an existing legacy github-token.txt in current folder or parent
-    $legacyTokenPath = Join-Path (Get-Location) "github-token.txt"
-    if (Test-Path $legacyTokenPath) {
-        $resolvedToken = (Get-Content $legacyTokenPath -Raw).Trim()
-        try {
-            $sec = ConvertTo-SecureString $resolvedToken -AsPlainText -Force
-            $enc = ConvertFrom-SecureString $sec
+    Write-Host ""
+    Write-Host "  [Key Setup] Optional GitHub Personal Access Token" -ForegroundColor Gray
+    Write-Host "  - Private visitor views, clones, and referrers require a token." -ForegroundColor DarkGray
+    Write-Host "  - Token will be encrypted with Windows DPAPI (locked to your user account) and masked." -ForegroundColor DarkGray
+    Write-Host "  - Press Enter to skip and continue in public mode (60 requests/hr)." -ForegroundColor DarkGray
+    Write-Host ""
+    try {
+        $secInput = Read-Host -Prompt "  Paste GitHub Token (hidden, press Enter to skip)" -AsSecureString
+        $bstr = [System.Runtime.InteropServices.Marshal]::SecureStringToBSTR($secInput)
+        $plain = [System.Runtime.InteropServices.Marshal]::PtrToStringAuto($bstr)
+        [System.Runtime.InteropServices.Marshal]::ZeroFreeBSTR($bstr)
+        
+        if (-not [string]::IsNullOrWhiteSpace($plain)) {
+            $enc = ConvertFrom-SecureString $secInput
             Set-Content -Path $tokenFile -Value $enc -Encoding UTF8
-            Write-Host "  [+] Imported and encrypted existing token into Windows DPAPI storage." -ForegroundColor Green
-        } catch {}
-    } else {
-        Write-Host ""
-        Write-Host "  [Key Setup] Optional GitHub Personal Access Token" -ForegroundColor Gray
-        Write-Host "  - Private visitor views, clones, and referrers require a fine-grained or classic token." -ForegroundColor DarkGray
-        Write-Host "  - Token will be encrypted with Windows DPAPI (locked to your user account) and masked." -ForegroundColor DarkGray
-        Write-Host "  - Press Enter to skip and continue in public mode (60 requests/hr)." -ForegroundColor DarkGray
-        Write-Host ""
-        try {
-            $secInput = Read-Host -Prompt "  Paste GitHub Token (hidden, press Enter to skip)" -AsSecureString
-            $bstr = [System.Runtime.InteropServices.Marshal]::SecureStringToBSTR($secInput)
-            $plain = [System.Runtime.InteropServices.Marshal]::PtrToStringAuto($bstr)
-            [System.Runtime.InteropServices.Marshal]::ZeroFreeBSTR($bstr)
-            
-            if (-not [string]::IsNullOrWhiteSpace($plain)) {
-                $enc = ConvertFrom-SecureString $secInput
-                Set-Content -Path $tokenFile -Value $enc -Encoding UTF8
-                $resolvedToken = $plain.Trim()
-                Write-Host "  [+] Token encrypted and saved safely to LocalAppData." -ForegroundColor Green
-            }
-        } catch {}
-    }
+            $resolvedToken = $plain.Trim()
+            Write-Host "  [+] Token encrypted and saved safely to LocalAppData." -ForegroundColor Green
+        }
+    } catch {}
 }
 
-# Setup GitHub headers
+# Setup GitHub headers and validate
 $headers = @{
     "User-Agent" = "GitMyRate-Analytics/1.0"
     "Accept"     = "application/vnd.github.v3+json"
@@ -181,11 +191,17 @@ $isAuthenticated = $false
 if (-not [string]::IsNullOrWhiteSpace($resolvedToken)) {
     $headers["Authorization"] = "Bearer $resolvedToken"
     try {
-        $authTest = Invoke-RestMethod -Uri "https://api.github.com/user" -Headers $headers -Method Get -TimeoutSec 8
-        $isAuthenticated = $true
-        Write-Host "  [✓] Authenticated as $($authTest.login) (Rate Limit: 5,000 req/hr)" -ForegroundColor Green
+        $rateCheck = Invoke-RestMethod -Uri "https://api.github.com/rate_limit" -Headers $headers -Method Get -TimeoutSec 6
+        if ($rateCheck.rate.limit -gt 60) {
+            $isAuthenticated = $true
+            Write-Host "  [+] Authenticated mode (GitHub Token active - $($rateCheck.rate.remaining)/$($rateCheck.rate.limit) req remaining)" -ForegroundColor Green
+        } else {
+            Write-Host "  [i] Token recognized but rate limit is standard public limit." -ForegroundColor Yellow
+            $isAuthenticated = $true
+        }
     } catch {
-        Write-Host "  [!] Token provided failed authentication. Falling back to public mode." -ForegroundColor Yellow
+        Write-Host "  [!] Token provided failed GitHub authentication: $($_.Exception.Message)" -ForegroundColor Red
+        Write-Host "      Tip: Run with -ResetToken or -Token 'ghp_...' to set a fresh token." -ForegroundColor Yellow
         $headers.Remove("Authorization")
         $isAuthenticated = $false
     }
@@ -1640,16 +1656,16 @@ $htmlTemplate = @'
       const daysSincePush = r.PushedAt ? Math.floor((new Date() - new Date(r.PushedAt)) / (1000 * 86400)) : 999;
       if (daysSincePush <= 14) {
         score += 30;
-        breakdown.push({ label: 'Recent commit (≤ 14d)', pts: '+30' });
+        breakdown.push({ label: 'Recent commit (<= 14d)', pts: '+30' });
       } else if (daysSincePush <= 30) {
         score += 25;
-        breakdown.push({ label: 'Active commit (≤ 30d)', pts: '+25' });
+        breakdown.push({ label: 'Active commit (<= 30d)', pts: '+25' });
       } else if (daysSincePush <= 90) {
         score += 18;
-        breakdown.push({ label: 'Committed (≤ 90d)', pts: '+18' });
+        breakdown.push({ label: 'Committed (<= 90d)', pts: '+18' });
       } else if (daysSincePush <= 180) {
         score += 10;
-        breakdown.push({ label: 'Committed (≤ 6mo)', pts: '+10' });
+        breakdown.push({ label: 'Committed (<= 6mo)', pts: '+10' });
       } else {
         score += 5;
         breakdown.push({ label: 'Stale (> 6mo)', pts: '+5' });
@@ -1958,7 +1974,7 @@ $htmlTemplate = @'
         const b1 = (h.breakdown && h.breakdown[1]) ? h.breakdown[1].pts : '';
         const b2 = (h.breakdown && h.breakdown[2]) ? h.breakdown[2].pts : '';
         const b3 = (h.breakdown && h.breakdown[3]) ? h.breakdown[3].pts : '';
-        const healthTooltip = `${r.Name} Repository Health: ${h.score}/100 (${h.status})&#10;&bull; Last push: ${h.daysSincePush <= 14 ? 'Recent (≤14d)' : h.daysSincePush + 'd ago'}&#10;&bull; Hygiene: ${b1}&#10;&bull; Traction: ${b2}&#10;&bull; Backlog: ${b3}`;
+        const healthTooltip = `${r.Name} Repository Health: ${h.score}/100 (${h.status})&#10;&bull; Last push: ${h.daysSincePush <= 14 ? 'Recent (<=14d)' : h.daysSincePush + 'd ago'}&#10;&bull; Hygiene: ${b1}&#10;&bull; Traction: ${b2}&#10;&bull; Backlog: ${b3}`;
 
         const conv = calculateRepoConversions(r);
 
