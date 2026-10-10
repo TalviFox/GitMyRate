@@ -1,4 +1,4 @@
-﻿<#
+<#
 .SYNOPSIS
     GitMyRate - Zero-Install GitHub Conversion Rates, Traffic Radar & Lifetime Analytics
     Hosted IEX Suite with Local DPAPI Hardware-Locked Encryption & Desktop Shortcut
