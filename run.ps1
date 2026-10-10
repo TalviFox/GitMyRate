@@ -280,18 +280,42 @@ while ($true) {
     }
 }
 
-# Load or initialize Yearly Traffic Archive
+# License detection helper
+function Get-DetailedLicense {
+    param([string]$owner, [string]$repoName, [string]$spdx)
+    $candidates = @("LICENSE", "LICENSE.md", "license", "license.txt")
+    foreach ($c in $candidates) {
+        try {
+            $raw = Invoke-RestMethod -Uri "https://raw.githubusercontent.com/$owner/$repoName/main/$c" -Headers $headers -Method Get
+            if ($raw -match "PolyForm Noncommercial") { return "PolyForm Noncommercial" }
+            if ($raw -match "PolyForm Perimeter") { return "PolyForm Perimeter" }
+            if ($raw -match "PolyForm Strict") { return "PolyForm Strict" }
+            if ($raw -match "PolyForm Small Business") { return "PolyForm Small Business" }
+            if ($raw -match "PolyForm") { return "PolyForm" }
+            if ($raw -match "CC BY-NC 4.0" -or $raw -match "Attribution-NonCommercial 4.0") { return "CC BY-NC 4.0" }
+            if ($raw -match "Creative Commons") { return "Creative Commons" }
+            if ($raw -match "MIT License") { return "MIT" }
+        } catch {}
+    }
+    if ($spdx -and $spdx -ne "NOASSERTION") { return $spdx } else { return "Custom" }
+}
+
+# Load existing permanent yearly archive
 $archive = @{}
 if (Test-Path -Path $yearlyFile) {
     try {
-        $raw = Get-Content -Path $yearlyFile -Raw | ConvertFrom-Json
-        foreach ($prop in $raw.PSObject.Properties) {
-            $archive[$prop.Name] = [PSCustomObject]@{
-                views   = [int]$prop.Value.views
-                uniques = [int]$prop.Value.uniques
-            }
+        $loaded = Get-Content -Path $yearlyFile -Raw | ConvertFrom-Json
+        foreach ($prop in $loaded.psobject.Properties) {
+            $archive[$prop.Name] = $prop.Value
         }
     } catch {}
+}
+
+# Initialize 14-day rolling timeline
+$today = (Get-Date).Date
+$timelineDays = [System.Collections.Generic.List[string]]::new()
+for ($i = 13; $i -ge 0; $i--) {
+    $timelineDays.Add($today.AddDays(-$i).ToString("yyyy-MM-dd"))
 }
 
 # Analyze Repositories
@@ -307,6 +331,7 @@ $totalForks = 0
 $total14DayViews = 0
 $total14DayClones = 0
 $total14DayUniqueClones = 0
+$trafficPermissionBlocked = $false
 
 foreach ($repo in $repos) {
     $repoName = $repo.name
@@ -323,105 +348,113 @@ foreach ($repo in $repos) {
     $releaseCount = 0
     $latestReleaseTag = ""
     try {
-        $releasesUrl = "https://api.github.com/repos/$Username/$repoName/releases?per_page=30"
+        $releasesUrl = "https://api.github.com/repos/$Username/$repoName/releases?per_page=50"
         $releases = Invoke-RestMethod -Uri $releasesUrl -Headers $headers -Method Get
         if ($releases -and $releases.Count -gt 0) {
             $releaseCount = $releases.Count
             $latestReleaseTag = $releases[0].tag_name
             foreach ($rel in $releases) {
-                $relDl = 0
-                $relAssets = [System.Collections.Generic.List[PSObject]]::new()
+                $relDownloads = 0
+                $assetList = [System.Collections.Generic.List[PSObject]]::new()
                 if ($rel.assets) {
                     foreach ($asset in $rel.assets) {
-                        $dl = [int]$asset.download_count
-                        $relDl += $dl
-                        $relAssets.Add([PSCustomObject]@{
+                        $dlCount = [int]$asset.download_count
+                        $relDownloads += $dlCount
+                        $assetList.Add([PSCustomObject]@{
                             name      = $asset.name
-                            downloads = $dl
-                            size      = $asset.size
+                            downloads = $dlCount
+                            size      = [int]$asset.size
                         })
                     }
                 }
-                $repoDownloads += $relDl
+                $repoDownloads += $relDownloads
+                $pubDate = if ($rel.published_at) { ([DateTime]::Parse($rel.published_at)).ToString("yyyy-MM-dd") } else { "" }
                 $allReleases.Add([PSCustomObject]@{
-                    repo      = $repoName
+                    repo      = $repo.name
                     tag       = $rel.tag_name
                     name      = if ($rel.name) { $rel.name } else { $rel.tag_name }
-                    date      = $rel.published_at.Substring(0, 10)
-                    downloads = $relDl
-                    assets    = $relAssets
+                    date      = $pubDate
+                    downloads = $relDownloads
+                    assets    = $assetList
                 })
             }
         }
     } catch {}
     $totalDownloads += $repoDownloads
 
-    # Traffic & Clones (Authenticated only)
+    # Check 14-day private traffic/referrers/clones if authenticated
     $repo14DayViews = 0
     $repo14DayUniques = 0
     $repo14DayClones = 0
     $repo14DayUniqueClones = 0
+    $repoDailyData = @{}
+    foreach ($day in $timelineDays) {
+        $repoDailyData[$day] = @{ views = 0; uniques = 0 }
+    }
 
-    if ($isAuthenticated) {
-        # Views
+    if ($isAuthenticated -and -not $isFork) {
         try {
-            $viewsData = Invoke-RestMethod -Uri "https://api.github.com/repos/$Username/$repoName/traffic/views" -Headers $headers -Method Get
+            $viewsData = Invoke-RestMethod -Uri "https://api.github.com/repos/$Username/$($repo.name)/traffic/views" -Headers $headers -Method Get
             $repo14DayViews = [int]$viewsData.count
             $repo14DayUniques = [int]$viewsData.uniques
             $total14DayViews += $repo14DayViews
 
             if ($viewsData.views) {
-                $repoDaily = @{}
                 foreach ($v in $viewsData.views) {
-                    $dayStr = $v.timestamp.Substring(0, 10)
-                    $cnt = [int]$v.count
-                    $unq = [int]$v.uniques
-                    $repoDaily[$dayStr] = @{ views = $cnt; uniques = $unq }
+                    $dayKey = ([DateTime]::Parse($v.timestamp)).ToString("yyyy-MM-dd")
+                    $vCount = [int]$v.count
+                    $vUniq = [int]$v.uniques
 
-                    if (-not $archive.ContainsKey($dayStr)) {
-                        $archive[$dayStr] = [PSCustomObject]@{ views = 0; uniques = 0 }
+                    $repoDailyData[$dayKey] = @{
+                        views   = $vCount
+                        uniques = $vUniq
                     }
-                    $archive[$dayStr].views += $cnt
-                    $archive[$dayStr].uniques += $unq
-                }
-                $dailyTrafficByRepo[$repoName] = $repoDaily
-            }
-        } catch {}
 
-        # Clones
-        try {
-            $clonesData = Invoke-RestMethod -Uri "https://api.github.com/repos/$Username/$repoName/traffic/clones" -Headers $headers -Method Get
+                    # Merge into permanent yearly archive
+                    if (-not $archive.ContainsKey($dayKey)) {
+                        $archive[$dayKey] = [PSCustomObject]@{
+                            views   = [PSCustomObject]@{}
+                            uniques = [PSCustomObject]@{}
+                        }
+                    }
+                    $archive[$dayKey].views | Add-Member -MemberType NoteProperty -Name $repo.name -Value $vCount -Force
+                    $archive[$dayKey].uniques | Add-Member -MemberType NoteProperty -Name $repo.name -Value $vUniq -Force
+                }
+            }
+
+            $refData = Invoke-RestMethod -Uri "https://api.github.com/repos/$Username/$($repo.name)/traffic/popular/referrers" -Headers $headers -Method Get
+            if ($refData) {
+                foreach ($ref in $refData) {
+                    $trafficReferrers.Add([PSCustomObject]@{
+                        Repo      = $repo.name
+                        Referrer  = $ref.referrer
+                        Count     = $ref.count
+                        Uniques   = $ref.uniques
+                    })
+                }
+            }
+
+            $clonesData = Invoke-RestMethod -Uri "https://api.github.com/repos/$Username/$($repo.name)/traffic/clones" -Headers $headers -Method Get
             $repo14DayClones = [int]$clonesData.count
             $repo14DayUniqueClones = [int]$clonesData.uniques
             $total14DayClones += $repo14DayClones
             $total14DayUniqueClones += $repo14DayUniqueClones
-        } catch {}
-
-        # Referrers
-        try {
-            $refData = Invoke-RestMethod -Uri "https://api.github.com/repos/$Username/$repoName/traffic/popular/referrers" -Headers $headers -Method Get
-            if ($refData) {
-                foreach ($rf in $refData) {
-                    $trafficReferrers.Add([PSCustomObject]@{
-                        Repo      = $repoName
-                        Referrer  = $rf.referrer
-                        Count     = [int]$rf.count
-                        Uniques   = [int]$rf.uniques
-                    })
-                }
+        } catch {
+            if ($_.ToString() -match "403" -or $_.ToString() -match "Resource not accessible") {
+                $trafficPermissionBlocked = $true
             }
-        } catch {}
+        }
     }
 
-    # License Detection
-    $detectedLicense = "Custom"
-    if ($repo.license -and $repo.license.spdx_id -and $repo.license.spdx_id -ne "NOASSERTION") {
-        $detectedLicense = $repo.license.spdx_id
-    }
+    $dailyTrafficByRepo[$repo.name] = $repoDailyData
 
-    # Format Size
+    # Format size
     $sizeKb = [int]$repo.size
-    $formattedSize = if ($sizeKb -ge 1024) { "{0:N1} MB" -f ($sizeKb / 1024) } else { "$sizeKb KB" }
+    $formattedSize = if ($sizeKb -gt 1024) { "{0:N1} MB" -f ($sizeKb / 1024) } else { "$sizeKb KB" }
+
+    # Detect license
+    $rawSpdx = if ($repo.license -and $repo.license.spdx_id) { $repo.license.spdx_id } else { "" }
+    $detectedLicense = Get-DetailedLicense -owner $Username -repoName $repo.name -spdx $rawSpdx
 
     # Normalize Language
     $lang = if ($repo.language) { $repo.language } else { "General" }
@@ -453,85 +486,209 @@ foreach ($repo in $repos) {
     })
 }
 
-# Save Yearly Traffic
+# Save permanent yearly archive to disk
 $archive | ConvertTo-Json -Depth 5 | Set-Content -Path $yearlyFile -Encoding UTF8
 
-# Build 14-day Rolling timeline
-$timelineDays = @()
-for ($i = 13; $i -ge 0; $i--) {
-    $timelineDays += (Get-Date).AddDays(-$i).ToString("yyyy-MM-dd")
-}
-
+# Build Rolling 14-day list
 $chartRolling14List = [System.Collections.Generic.List[PSObject]]::new()
 foreach ($day in $timelineDays) {
     $sumViews = 0
     $sumUniques = 0
-    if ($archive.ContainsKey($day)) {
-        $sumViews = [int]$archive[$day].views
-        $sumUniques = [int]$archive[$day].uniques
+    $dObj = [DateTime]::Parse($day)
+    $label = $dObj.ToString("MMM dd")
+
+    foreach ($rName in $dailyTrafficByRepo.Keys) {
+        $rDay = $dailyTrafficByRepo[$rName][$day]
+        if ($rDay) {
+            $sumViews += $rDay.views
+            $sumUniques += $rDay.uniques
+        }
     }
+
     $chartRolling14List.Add([PSCustomObject]@{
         date    = $day
+        label   = $label
         views   = $sumViews
         uniques = $sumUniques
     })
 }
 
-# Build Lifetime Cumulative Timeline
+# Build Permanent Cumulative Year Timeline
+$allDatesSet = [System.Collections.Generic.HashSet[string]]::new()
+foreach ($k in $archive.Keys) { $allDatesSet.Add($k) | Out-Null }
+foreach ($rel in $allReleases) {
+    if ($rel.date) { $allDatesSet.Add($rel.date) | Out-Null }
+}
+$sortedDates = $allDatesSet | Sort-Object
+
 $chartCumulativeList = [System.Collections.Generic.List[PSObject]]::new()
-$sortedDays = $archive.Keys | Sort-Object
-$cumViews = 0
-$cumUniques = 0
-foreach ($d in $sortedDays) {
-    $cumViews += [int]$archive[$d].views
-    $cumUniques += [int]$archive[$d].uniques
+$runningCombinedViews = 0
+$runningCombinedUniques = 0
+$runningCombinedDownloads = 0
+
+$runningPerRepoViews = @{}
+$runningPerRepoUniques = @{}
+$runningPerRepoDownloads = @{}
+foreach ($repo in $repos) {
+    $runningPerRepoViews[$repo.name] = 0
+    $runningPerRepoUniques[$repo.name] = 0
+    $runningPerRepoDownloads[$repo.name] = 0
+}
+
+$releasesByDate = @{}
+foreach ($rel in $allReleases) {
+    if ($rel.date) {
+        if (-not $releasesByDate.ContainsKey($rel.date)) {
+            $releasesByDate[$rel.date] = [System.Collections.Generic.List[PSObject]]::new()
+        }
+        $releasesByDate[$rel.date].Add($rel)
+    }
+}
+
+foreach ($dateKey in $sortedDates) {
+    $dayViewsCombined = 0
+    $dayUniquesCombined = 0
+    $dayDownloadsCombined = 0
+
+    $dayRepoViews = @{}
+    $dayRepoUniques = @{}
+    $dayRepoDownloads = @{}
+    $dayCumRepoViews = @{}
+    $dayCumRepoUniques = @{}
+    $dayCumRepoDownloads = @{}
+
+    foreach ($repo in $repos) {
+        $dayRepoViews[$repo.name] = 0
+        $dayRepoUniques[$repo.name] = 0
+        $dayRepoDownloads[$repo.name] = 0
+    }
+
+    if ($archive.ContainsKey($dateKey)) {
+        if ($archive[$dateKey].views) {
+            foreach ($prop in $archive[$dateKey].views.psobject.Properties) {
+                $val = [int]$prop.Value
+                $dayViewsCombined += $val
+                $dayRepoViews[$prop.Name] = $val
+                $runningPerRepoViews[$prop.Name] = ([int]$runningPerRepoViews[$prop.Name]) + $val
+            }
+        }
+        if ($archive[$dateKey].uniques) {
+            foreach ($prop in $archive[$dateKey].uniques.psobject.Properties) {
+                $val = [int]$prop.Value
+                $dayUniquesCombined += $val
+                $dayRepoUniques[$prop.Name] = $val
+                $runningPerRepoUniques[$prop.Name] = ([int]$runningPerRepoUniques[$prop.Name]) + $val
+            }
+        }
+    }
+
+    if ($releasesByDate.ContainsKey($dateKey)) {
+        foreach ($rel in $releasesByDate[$dateKey]) {
+            $dl = [int]$rel.downloads
+            $dayDownloadsCombined += $dl
+            $dayRepoDownloads[$rel.repo] = ([int]$dayRepoDownloads[$rel.repo]) + $dl
+            $runningPerRepoDownloads[$rel.repo] = ([int]$runningPerRepoDownloads[$rel.repo]) + $dl
+        }
+    }
+
+    foreach ($repo in $repos) {
+        $dayCumRepoViews[$repo.name] = [int]$runningPerRepoViews[$repo.name]
+        $dayCumRepoUniques[$repo.name] = [int]$runningPerRepoUniques[$repo.name]
+        $dayCumRepoDownloads[$repo.name] = [int]$runningPerRepoDownloads[$repo.name]
+    }
+
+    $runningCombinedViews += $dayViewsCombined
+    $runningCombinedUniques += $dayUniquesCombined
+    $runningCombinedDownloads += $dayDownloadsCombined
+
     $chartCumulativeList.Add([PSCustomObject]@{
-        date       = $d
-        cumViews   = $cumViews
-        cumUniques = $cumUniques
-        dayViews   = [int]$archive[$d].views
-        dayUniques = [int]$archive[$d].uniques
+        date                 = $dateKey
+        label                = ([DateTime]::Parse($dateKey)).ToString("MMM dd")
+        month                = ([DateTime]::Parse($dateKey)).ToString("MMM yyyy")
+        dayViews             = $dayViewsCombined
+        dayUniques           = $dayUniquesCombined
+        dayDownloads         = $dayDownloadsCombined
+        cumViews             = $runningCombinedViews
+        cumUniques           = $runningCombinedUniques
+        cumDownloads         = $runningCombinedDownloads
+        byRepoDayViews       = $dayRepoViews
+        byRepoDayUniques     = $dayRepoUniques
+        byRepoDayDownloads   = $dayRepoDownloads
+        byRepoCumViews       = $dayCumRepoViews
+        byRepoCumUniques     = $dayCumRepoUniques
+        byRepoCumDownloads   = $dayCumRepoDownloads
     })
 }
 
-# Historical Snapshot Tracking
-$historyList = [System.Collections.Generic.List[PSObject]]::new()
+# ----------------- JSON History Tracking -----------------
+$history = @()
 if (Test-Path -Path $historyFile) {
     try {
-        $rawHist = Get-Content -Path $historyFile -Raw | ConvertFrom-Json
-        if ($rawHist -is [System.Array]) {
-            foreach ($h in $rawHist) { $historyList.Add($h) }
-        } elseif ($null -ne $rawHist) {
-            $historyList.Add($rawHist)
+        $jsonRaw = Get-Content -Path $historyFile -Raw
+        if ($jsonRaw -and $jsonRaw.Trim()) {
+            $parsed = $jsonRaw | ConvertFrom-Json
+            if ($parsed -is [System.Array]) { $history = $parsed } else { $history = @($parsed) }
         }
+    } catch {
+        $history = @()
+    }
+}
+
+# Fallback: if live traffic returned 0 because of unauthenticated mode, recover previous known metrics
+if ($total14DayViews -eq 0 -and $history.Count -gt 0) {
+    $lastSnap = $history[-1]
+    if ($lastSnap.totalViews14d -gt 0) {
+        $total14DayViews = [int]$lastSnap.totalViews14d
+        $total14DayClones = [int]$lastSnap.totalClones14d
+        $total14DayUniqueClones = [int]$lastSnap.totalUniqueClones14d
+    }
+}
+
+$deltaStars = 0
+$deltaDownloads = 0
+if ($history.Count -gt 0) {
+    $lastSnap = $history[-1]
+    $deltaStars = [Math]::Max(0, $totalStars - [int]$lastSnap.totalStars)
+    $deltaDownloads = [Math]::Max(0, $totalDownloads - [int]$lastSnap.totalDownloads)
+}
+
+$currentSnapshot = [PSCustomObject]@{
+    timestamp           = (Get-Date).ToString("o")
+    dateDisplay         = (Get-Date).ToString("yyyy-MM-dd HH:mm")
+    totalStars          = $totalStars
+    totalDownloads      = $totalDownloads
+    totalForks          = $totalForks
+    totalRepos          = $analyzedRepos.Count
+    totalViews14d       = $total14DayViews
+    totalClones14d      = $total14DayClones
+    totalUniqueClones14d = $total14DayUniqueClones
+    yearCumulativeViews = $runningCombinedViews
+    repos               = ($analyzedRepos | Select-Object Name, Stars, Downloads, Forks, Views14Days, License, Language)
+}
+
+$historyList = [System.Collections.Generic.List[PSObject]]::new()
+foreach ($item in $history) { $historyList.Add($item) }
+
+$todayDateStr = (Get-Date).ToString("yyyy-MM-dd")
+$lastSnapDateStr = ""
+if ($history.Count -gt 0 -and $history[-1].timestamp) {
+    try {
+        $lastSnapDateStr = ([DateTime]::Parse($history[-1].timestamp)).ToString("yyyy-MM-dd")
     } catch {}
 }
 
-# Compute deltas from last record
-$deltaStars = 0
-$deltaDownloads = 0
-if ($historyList.Count -gt 0) {
-    $lastRecord = $historyList[-1]
-    $deltaStars = [Math]::Max(0, $totalStars - [int]$lastRecord.totalStars)
-    $deltaDownloads = [Math]::Max(0, $totalDownloads - [int]$lastRecord.totalDownloads)
+if ($lastSnapDateStr -eq $todayDateStr -and $historyList.Count -gt 0) {
+    $historyList[$historyList.Count - 1] = $currentSnapshot
+} else {
+    $historyList.Add($currentSnapshot)
 }
 
-# Append today's record
-$historyList.Add([PSCustomObject]@{
-    timestamp              = (Get-Date).ToString("o")
-    dateDisplay            = (Get-Date).ToString("yyyy-MM-dd HH:mm")
-    totalStars             = $totalStars
-    totalDownloads         = $totalDownloads
-    totalForks             = $totalForks
-    totalRepos             = $analyzedRepos.Count
-    totalViews14d          = $total14DayViews
-    totalClones14d         = $total14DayClones
-    totalUniqueClones14d   = $total14DayUniqueClones
-    yearCumulativeViews    = $cumViews
-    repos                  = ($analyzedRepos | Select-Object Name, Stars, Downloads, Forks, Views14Days, License, Language)
-})
+if ($historyList.Count -gt 300) {
+    $historyList = [System.Collections.Generic.List[PSObject]]::new($historyList[($historyList.Count - 300)..($historyList.Count - 1)])
+}
 
-Set-Content -Path $historyFile -Value ($historyList | ConvertTo-Json -Depth 5) -Encoding UTF8
+$historyJson = if ($historyList.Count -eq 1) { "[ " + ($historyList[0] | ConvertTo-Json -Depth 5) + " ]" } else { $historyList | ConvertTo-Json -Depth 5 }
+Set-Content -Path $historyFile -Value $historyJson -Encoding UTF8
 $historyCompressed = if ($historyList.Count -eq 1) { "[ " + ($historyList[0] | ConvertTo-Json -Depth 5 -Compress) + " ]" } else { $historyList | ConvertTo-Json -Depth 5 -Compress }
 
 # Handle Avatar & Desktop Shortcut
