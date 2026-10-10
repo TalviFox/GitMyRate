@@ -1,7 +1,7 @@
 <#
 .SYNOPSIS
-    GitMyRate - Zero-Install GitHub Conversion Rates, Traffic Radar & Lifetime Analytics
-    Hosted IEX Suite with Local DPAPI Hardware-Locked Encryption & Desktop Shortcut
+    GitMyRate - Zero-Install GitHub Conversion Rates, Traffic Radar and Lifetime Analytics
+    Hosted IEX Suite with Local DPAPI Hardware-Locked Encryption and Desktop Shortcut
 .DESCRIPTION
     Pulls visitor traffic, release asset downloads, clone velocity, and audience conversion
     metrics from GitHub. Bypasses GitHub's 14-day deletion limit by archiving historical stats
