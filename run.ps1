@@ -40,7 +40,7 @@ $launcherPs1 = Join-Path -Path $appDataDir -ChildPath "launcher.ps1"
 
 Write-Host ""
 Write-Host "   ======================================================" -ForegroundColor Cyan
-Write-Host "                GitMyRate - Audience & Vitals            " -ForegroundColor White
+Write-Host "            GitMyRate - Audience, Radar & Vitals         " -ForegroundColor White
 Write-Host "   ======================================================" -ForegroundColor Cyan
 Write-Host ""
 
@@ -63,23 +63,57 @@ if (Test-Path -Path $configFile) {
     }
 }
 
+# Auto-discover existing local dashboard data (Desktop migration)
+$possibleLegacyDirs = @(
+    (Get-Location).Path,
+    (Join-Path ([Environment]::GetFolderPath("Desktop")) "TalviFox Dashboard"),
+    (Join-Path $env:USERPROFILE "Desktop\TalviFox Dashboard")
+) | Select-Object -Unique
+
+foreach ($ld in $possibleLegacyDirs) {
+    if (Test-Path $ld) {
+        # Check for legacy token
+        $legToken = Join-Path $ld "github-token.txt"
+        if ((Test-Path $legToken) -and (-not (Test-Path $tokenFile))) {
+            $rawToken = (Get-Content $legToken -Raw).Trim()
+            if (-not [string]::IsNullOrWhiteSpace($rawToken)) {
+                $sec = ConvertTo-SecureString $rawToken -AsPlainText -Force
+                $enc = ConvertFrom-SecureString $sec
+                Set-Content -Path $tokenFile -Value $enc -Encoding UTF8
+                Write-Host "  [+] Discovered and encrypted existing GitHub token from '$ld'." -ForegroundColor Green
+            }
+        }
+        # Check for history
+        $legHist = Join-Path $ld "stats-history.json"
+        if ((Test-Path $legHist) -and (-not (Test-Path $historyFile))) {
+            Copy-Item $legHist $historyFile -Force
+            Write-Host "  [+] Migrated historical stats-history.json into GitMyRate." -ForegroundColor Green
+        }
+        # Check for yearly traffic
+        $legYear = Join-Path $ld "yearly-traffic.json"
+        if ((Test-Path $legYear) -and (-not (Test-Path $yearlyFile))) {
+            Copy-Item $legYear $yearlyFile -Force
+            Write-Host "  [+] Migrated yearly-traffic.json archive into GitMyRate." -ForegroundColor Green
+        }
+    }
+}
+
 # Determine GitHub Username
 $Username = $TargetUsername
 if ([string]::IsNullOrWhiteSpace($Username)) {
     if ($config.ContainsKey('Username') -and -not [string]::IsNullOrWhiteSpace($config['Username'])) {
         $Username = $config['Username']
     } else {
-        # Check git config
         $detectedUser = ""
         try {
             $detectedUser = (git config --get user.name) 2>$null
         } catch {}
 
-        $promptMsg = if ($detectedUser) { "Enter GitHub Username [default: $detectedUser]" } else { "Enter GitHub Username" }
-        Write-Host -NoNewline "  ? ${promptMsg}: " -ForegroundColor Yellow
+        $defaultUser = if (-not [string]::IsNullOrWhiteSpace($detectedUser)) { $detectedUser } else { "TalviFox" }
+        Write-Host -NoNewline "  ? Enter GitHub Username [default: $defaultUser]: " -ForegroundColor Yellow
         $inputUser = [Console]::ReadLine()
         if ([string]::IsNullOrWhiteSpace($inputUser)) {
-            $Username = if ($detectedUser) { $detectedUser } else { "TalviFox" }
+            $Username = $defaultUser
         } else {
             $Username = $inputUser.Trim()
         }
@@ -109,7 +143,6 @@ if (-not [string]::IsNullOrWhiteSpace($Token)) {
     $legacyTokenPath = Join-Path (Get-Location) "github-token.txt"
     if (Test-Path $legacyTokenPath) {
         $resolvedToken = (Get-Content $legacyTokenPath -Raw).Trim()
-        # Migrate into DPAPI
         try {
             $sec = ConvertTo-SecureString $resolvedToken -AsPlainText -Force
             $enc = ConvertFrom-SecureString $sec
@@ -117,7 +150,6 @@ if (-not [string]::IsNullOrWhiteSpace($Token)) {
             Write-Host "  [+] Imported and encrypted existing token into Windows DPAPI storage." -ForegroundColor Green
         } catch {}
     } else {
-        # First-time interactive prompt
         Write-Host ""
         Write-Host "  [Key Setup] Optional GitHub Personal Access Token" -ForegroundColor Gray
         Write-Host "  - Private visitor views, clones, and referrers require a fine-grained or classic token." -ForegroundColor DarkGray
@@ -148,7 +180,6 @@ $headers = @{
 $isAuthenticated = $false
 if (-not [string]::IsNullOrWhiteSpace($resolvedToken)) {
     $headers["Authorization"] = "Bearer $resolvedToken"
-    # Validate token
     try {
         $authTest = Invoke-RestMethod -Uri "https://api.github.com/user" -Headers $headers -Method Get -TimeoutSec 8
         $isAuthenticated = $true
@@ -501,6 +532,7 @@ $historyList.Add([PSCustomObject]@{
 })
 
 Set-Content -Path $historyFile -Value ($historyList | ConvertTo-Json -Depth 5) -Encoding UTF8
+$historyCompressed = if ($historyList.Count -eq 1) { "[ " + ($historyList[0] | ConvertTo-Json -Depth 5 -Compress) + " ]" } else { $historyList | ConvertTo-Json -Depth 5 -Compress }
 
 # Handle Avatar & Desktop Shortcut
 $avatarUrl = $user.avatar_url
@@ -508,17 +540,14 @@ $avatarDataUri = $avatarUrl
 $hasCustomIcon = $false
 
 try {
-    # Download avatar bytes
     $wc = New-Object System.Net.WebClient
     $wc.Headers.Add("User-Agent", "GitMyRate-Setup")
     $avatarBytes = $wc.DownloadData($avatarUrl)
     $wc.Dispose()
 
-    # Base64 encode for embedding inside HTML report
     $b64 = [Convert]::ToBase64String($avatarBytes)
     $avatarDataUri = "data:image/png;base64,$b64"
 
-    # Convert to .ICO for Windows Desktop Shortcut
     Add-Type -AssemblyName System.Drawing -ErrorAction SilentlyContinue
     if ([System.Type]::GetType("System.Drawing.Bitmap")) {
         $ms = [System.IO.MemoryStream]::new($avatarBytes)
@@ -537,7 +566,6 @@ try {
         $hasCustomIcon = $true
     }
 } catch {
-    # Silent fallback - zero crashes
     $hasCustomIcon = $false
 }
 
@@ -545,7 +573,6 @@ try {
 $desktopPath = [Environment]::GetFolderPath("Desktop")
 $shortcutFile = Join-Path -Path $desktopPath -ChildPath "GitMyRate ($Username).lnk"
 
-# Write offline-resilient launcher trampoline script
 $launcherContent = @"
 try {
     if ([System.Net.NetworkInformation.NetworkInterface]::GetIsNetworkAvailable()) {
@@ -576,12 +603,16 @@ if ($CreateShortcut -or (-not (Test-Path $shortcutFile))) {
         }
         $sc.Save()
         Write-Host "  [+] Desktop Shortcut created: 'GitMyRate ($Username).lnk'" -ForegroundColor Green
-    } catch {
-        # Silently proceed if shortcut cannot be written
-    }
+    } catch {}
 }
 
 Write-Host "  [4/4] Rendering GitMyRate HTML Dashboard..." -ForegroundColor Cyan
+
+# Prepare radar queries
+$searchTerms = @($analyzedRepos | ForEach-Object { $_.Name }) + @($Username) | Select-Object -Unique
+$radarQueryQuoted = ($searchTerms | ForEach-Object { "%22" + [System.Web.HttpUtility]::UrlEncode($_) + "%22" }) -join "+OR+"
+$radarQueryPlain = ($searchTerms | ForEach-Object { [System.Web.HttpUtility]::UrlEncode($_) }) -join "+OR+"
+$radarTermsDisplay = ($searchTerms | ForEach-Object { "<code>$_</code>" }) -join ", "
 
 # Prepare Referrers / Traffic Block
 $trafficHtml = ""
@@ -642,6 +673,10 @@ $bio = if ($user.bio) { $user.bio } else { "Open Source Creator & Developer" }
 $generatedAt = (Get-Date).ToString("yyyy-MM-dd HH:mm:ss")
 
 $reposJson = $analyzedRepos | ConvertTo-Json -Depth 5 -Compress
+$rolling14Json = $chartRolling14List | ConvertTo-Json -Depth 5 -Compress
+$cumulativeYearJson = $chartCumulativeList | ConvertTo-Json -Depth 5 -Compress
+$byRepoDailyJson = $dailyTrafficByRepo | ConvertTo-Json -Depth 5 -Compress
+$allReleasesJson = $allReleases | ConvertTo-Json -Depth 6 -Compress
 
 # Build HTML template
 $htmlTemplate = @'
@@ -667,9 +702,12 @@ $htmlTemplate = @'
       --star-color: #fbbf24;
       --download-color: #34d399;
       --fork-color: #c084fc;
+      --issue-color: #f87171;
       --views-color: #38bdf8;
     }
+
     * { box-sizing: border-box; margin: 0; padding: 0; }
+
     body {
       background: radial-gradient(circle at 10% 10%, #152037 0%, var(--bg) 55%),
                   radial-gradient(circle at 90% 90%, #171b30 0%, var(--bg) 65%);
@@ -678,98 +716,236 @@ $htmlTemplate = @'
       min-height: 100vh;
       padding: 2.5rem 1.5rem 4rem 1.5rem;
     }
+
     .container { max-width: 1280px; margin: 0 auto; }
+
+    /* Profile Header */
     .profile-banner {
       display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between;
-      gap: 1.5rem; background: var(--card-bg); border: 1px solid var(--card-border);
-      border-radius: 1.25rem; padding: 1.75rem 2rem; backdrop-filter: blur(16px);
-      box-shadow: 0 10px 30px rgba(0,0,0,0.3); margin-bottom: 2rem;
+      gap: 1.5rem; background: var(--card-bg); backdrop-filter: blur(16px);
+      border: 1px solid var(--card-border); border-radius: 20px; padding: 1.75rem 2rem;
+      margin-bottom: 2rem; box-shadow: 0 12px 35px rgba(0, 0, 0, 0.4);
     }
-    .profile-left { display: flex; align-items: center; gap: 1.25rem; }
-    .avatar { width: 72px; height: 72px; border-radius: 50%; border: 3px solid var(--accent-primary); box-shadow: 0 0 20px rgba(56,189,248,0.3); }
-    .profile-info h1 { font-size: 1.75rem; font-weight: 800; }
-    .profile-bio { color: var(--text-muted); font-size: 0.9rem; margin-top: 0.25rem; }
+    .profile-info { display: flex; align-items: center; gap: 1.25rem; }
+    .avatar {
+      width: 76px; height: 76px; border-radius: 20px; border: 2px solid #38bdf8;
+      box-shadow: 0 0 25px rgba(56, 189, 248, 0.35); object-fit: cover; background: #090d16;
+    }
+    .profile-title {
+      font-size: 1.65rem; font-weight: 800; letter-spacing: -0.02em;
+      background: linear-gradient(135deg, #ffffff 40%, #94a3b8);
+      -webkit-background-clip: text; -webkit-text-fill-color: transparent;
+    }
+    .profile-handle {
+      color: var(--accent-primary); text-decoration: none; font-weight: 600;
+      font-size: 0.95rem; display: inline-flex; align-items: center; gap: 0.35rem; margin-top: 0.3rem;
+    }
+    .profile-handle:hover { text-decoration: underline; }
     .brand-badge {
-      display: inline-flex; align-items: center; gap: 0.4rem; padding: 0.35rem 0.75rem;
+      display: inline-flex; align-items: center; gap: 0.4rem; padding: 0.4rem 0.85rem;
       border-radius: 9999px; background: rgba(56, 189, 248, 0.12); color: var(--accent-primary);
-      border: 1px solid rgba(56, 189, 248, 0.25); font-size: 0.75rem; font-weight: 700;
+      border: 1px solid rgba(56, 189, 248, 0.25); font-size: 0.8rem; font-weight: 700;
     }
-    .kpi-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 1rem; margin-bottom: 2rem; }
+    .btn {
+      display: inline-flex; align-items: center; gap: 0.5rem; padding: 0.65rem 1.15rem;
+      border-radius: 10px; font-weight: 600; font-size: 0.88rem; text-decoration: none;
+      cursor: pointer; transition: all 0.2s ease; border: 1px solid var(--card-border);
+      background: rgba(255, 255, 255, 0.05); color: var(--text-main);
+    }
+    .btn:hover { background: rgba(255, 255, 255, 0.12); transform: translateY(-2px); }
+
+    /* KPIs */
+    .kpi-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 1rem; margin-bottom: 2rem; }
     .kpi-card {
-      background: var(--card-bg); border: 1px solid var(--card-border); border-radius: 1rem;
-      padding: 1.25rem; display: flex; align-items: center; gap: 1rem; backdrop-filter: blur(12px);
+      background: var(--card-bg); backdrop-filter: blur(16px); border: 1px solid var(--card-border);
+      border-radius: 16px; padding: 1.25rem 1.5rem; display: flex; align-items: center; gap: 1.25rem;
+      transition: transform 0.2s ease, border-color 0.2s ease;
     }
-    .kpi-icon { font-size: 1.8rem; }
-    .kpi-val { font-size: 1.65rem; font-weight: 800; font-family: 'JetBrains Mono', monospace; }
-    .kpi-lbl { font-size: 0.8rem; color: var(--text-muted); text-transform: uppercase; font-weight: 600; }
-    .kpi-delta { font-size: 0.75rem; padding: 0.15rem 0.45rem; border-radius: 9999px; background: rgba(52, 211, 153, 0.15); color: #34d399; font-weight: 700; margin-left: 0.35rem; }
-    
-    /* Funnel */
+    .kpi-card:hover { transform: translateY(-2px); border-color: rgba(255, 255, 255, 0.18); }
+    .kpi-icon { font-size: 2rem; }
+    .kpi-value { font-size: 1.85rem; font-weight: 800; font-family: 'JetBrains Mono', monospace; }
+    .kpi-label { font-size: 0.82rem; color: var(--text-muted); text-transform: uppercase; font-weight: 600; letter-spacing: 0.05em; margin-top: 0.2rem; }
+    .kpi-delta { font-size: 0.72rem; padding: 0.15rem 0.45rem; border-radius: 9999px; background: rgba(52, 211, 153, 0.15); color: #34d399; font-weight: 700; margin-left: 0.35rem; }
+
+    /* Funnel Section */
     .funnel-section {
-      background: var(--card-bg); border: 1px solid var(--card-border); border-radius: 1.25rem;
-      padding: 1.5rem; margin-bottom: 2rem;
+      background: var(--card-bg); backdrop-filter: blur(16px); border: 1px solid var(--card-border);
+      border-radius: 20px; padding: 1.75rem 2rem; margin-bottom: 2rem; box-shadow: 0 8px 30px rgba(0,0,0,0.3);
     }
-    .funnel-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(210px, 1fr)); gap: 0.85rem; margin-top: 1rem; }
+    .funnel-header { display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 0.75rem; margin-bottom: 1.25rem; }
+    .funnel-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(210px, 1fr)); gap: 1rem; margin-bottom: 1.5rem; }
     .funnel-card {
-      background: rgba(15, 23, 42, 0.6); border: 1px solid rgba(255, 255, 255, 0.05);
-      border-radius: 0.85rem; padding: 1rem;
+      background: rgba(15, 23, 42, 0.55); border: 1px solid rgba(255, 255, 255, 0.06);
+      border-radius: 14px; padding: 1.15rem; display: flex; flex-direction: column; justify-content: space-between;
     }
-    .funnel-val { font-size: 1.5rem; font-weight: 800; margin: 0.35rem 0; font-family: 'JetBrains Mono', monospace; }
-    .funnel-formula { font-size: 0.72rem; color: var(--text-muted); }
-    .funnel-desc { font-size: 0.78rem; color: #cbd5e1; margin-top: 0.4rem; line-height: 1.35; }
-    
-    /* Toolbar */
+    .funnel-card-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 0.5rem; }
+    .funnel-card-label { font-size: 0.82rem; font-weight: 600; color: #94a3b8; }
+    .funnel-pill { font-size: 0.7rem; font-weight: 700; padding: 0.15rem 0.5rem; border-radius: 9999px; }
+    .funnel-card-val { font-size: 1.65rem; font-weight: 800; font-family: 'JetBrains Mono', monospace; }
+    .funnel-card-formula { font-size: 0.72rem; color: #64748b; margin-top: 0.25rem; }
+    .funnel-card-desc { font-size: 0.78rem; color: #cbd5e1; margin-top: 0.6rem; line-height: 1.35; }
+    .funnel-flow {
+      display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 0.5rem;
+      padding: 1rem 1.25rem; background: rgba(15, 23, 42, 0.45); border: 1px solid rgba(255, 255, 255, 0.05);
+      border-radius: 12px;
+    }
+    .stage-pill {
+      display: flex; align-items: center; gap: 0.4rem; padding: 0.4rem 0.85rem; border-radius: 8px;
+      font-size: 0.84rem; font-weight: 600; background: rgba(255, 255, 255, 0.03);
+    }
+    .funnel-arrow { color: #475569; font-weight: 700; font-size: 1.1rem; }
+
+    /* Interactive Chart */
+    .chart-section {
+      background: var(--card-bg); backdrop-filter: blur(16px); border: 1px solid var(--card-border);
+      border-radius: 20px; padding: 1.75rem 2rem; margin-bottom: 2rem; box-shadow: 0 8px 30px rgba(0, 0, 0, 0.3);
+    }
+    .chart-header { display: flex; flex-wrap: wrap; justify-content: space-between; align-items: center; gap: 1rem; margin-bottom: 1.5rem; }
+    .chart-controls { display: flex; flex-wrap: wrap; gap: 0.6rem; align-items: center; }
+    .view-mode-group {
+      display: inline-flex; background: rgba(15, 23, 42, 0.75); border: 1px solid var(--card-border);
+      border-radius: 10px; padding: 3px; gap: 2px;
+    }
+    .view-mode-btn {
+      background: transparent; border: none; color: var(--text-muted); font-size: 0.78rem;
+      font-weight: 600; padding: 0.4rem 0.85rem; border-radius: 7px; cursor: pointer; transition: all 0.2s ease;
+    }
+    .view-mode-btn.active { background: #38bdf8; color: #090d16; font-weight: 700; }
+    .chart-select {
+      background: rgba(15, 23, 42, 0.8); border: 1px solid var(--card-border); color: var(--text-main);
+      padding: 0.45rem 0.85rem; border-radius: 8px; font-size: 0.8rem; font-weight: 600;
+    }
+    .chart-metric-btn {
+      background: rgba(255, 255, 255, 0.05); border: 1px solid var(--card-border); color: var(--text-muted);
+      padding: 0.4rem 0.75rem; border-radius: 8px; font-size: 0.78rem; font-weight: 600; cursor: pointer;
+    }
+    .chart-metric-btn.active { background: rgba(56, 189, 248, 0.2); border-color: #38bdf8; color: #38bdf8; font-weight: 700; }
+
+    .bars-container { display: flex; align-items: flex-end; gap: 8px; height: 180px; padding: 1rem 0.5rem 0.5rem 0.5rem; }
+    .bar-col { flex: 1; display: flex; flex-direction: column; align-items: center; height: 100%; justify-content: flex-end; position: relative; }
+    .bar-fill {
+      width: 100%; min-height: 4px; border-radius: 6px 6px 0 0;
+      background: linear-gradient(180deg, #38bdf8 0%, #0284c7 100%);
+      transition: height 0.4s cubic-bezier(0.16, 1, 0.3, 1);
+    }
+    .bar-col:hover .bar-fill { background: linear-gradient(180deg, #7dd3fc 0%, #0369a1 100%); }
+    .bars-x-axis { display: flex; gap: 8px; padding: 0.5rem; border-top: 1px solid rgba(255, 255, 255, 0.08); }
+    .x-label { flex: 1; text-align: center; font-size: 0.72rem; color: var(--text-muted); font-family: 'JetBrains Mono', monospace; }
+    .chart-summary-bar {
+      display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 1rem;
+      padding-top: 1rem; margin-top: 0.5rem; border-top: 1px solid rgba(255, 255, 255, 0.06); font-size: 0.82rem;
+    }
+    .chart-stat-item { display: flex; gap: 0.4rem; align-items: baseline; }
+    .chart-stat-val { font-weight: 800; color: #38bdf8; font-family: 'JetBrains Mono', monospace; }
+
+    /* History Drawer */
+    .history-card {
+      display: none; background: rgba(15, 23, 42, 0.9); border: 1px solid var(--card-border);
+      border-radius: 16px; padding: 1.5rem; margin-bottom: 2rem;
+    }
+    .history-table { width: 100%; border-collapse: collapse; font-size: 0.84rem; }
+    .history-table th, .history-table td { padding: 0.65rem 0.75rem; text-align: left; border-bottom: 1px solid rgba(255, 255, 255, 0.06); }
+    .history-table th { color: var(--text-muted); font-size: 0.75rem; text-transform: uppercase; }
+
+    /* Web Buzz Radar */
+    .hubbub-section {
+      background: var(--card-bg); backdrop-filter: blur(16px); border: 1px solid var(--card-border);
+      border-radius: 20px; padding: 1.75rem 2rem; margin-bottom: 2rem; box-shadow: 0 8px 30px rgba(0, 0, 0, 0.3);
+    }
+    .hubbub-header { display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 0.5rem; margin-bottom: 1rem; }
+    .hubbub-badge { font-size: 0.72rem; padding: 0.2rem 0.6rem; border-radius: 9999px; background: rgba(56, 189, 248, 0.15); color: #38bdf8; font-weight: 700; }
+    .radar-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 0.85rem; margin: 1.25rem 0; }
+    .radar-btn {
+      display: flex; align-items: center; gap: 0.85rem; padding: 0.85rem 1rem; background: rgba(15, 23, 42, 0.6);
+      border: 1px solid rgba(255, 255, 255, 0.06); border-radius: 12px; text-decoration: none; transition: all 0.2s ease;
+    }
+    .radar-btn:hover { background: rgba(30, 41, 59, 0.8); border-color: rgba(56, 189, 248, 0.4); transform: translateY(-2px); }
+    .radar-icon { font-size: 1.5rem; }
+    .radar-meta-title { display: block; font-size: 0.86rem; font-weight: 700; color: #f1f5f9; }
+    .radar-meta-sub { display: block; font-size: 0.72rem; color: #94a3b8; margin-top: 0.15rem; }
+
+    /* Inbound Referrers / Traffic */
+    .traffic-box { background: rgba(15, 23, 42, 0.6); border: 1px solid var(--card-border); border-radius: 14px; padding: 1.25rem; }
+    .traffic-title { font-size: 0.95rem; font-weight: 700; color: #38bdf8; margin-bottom: 0.5rem; }
+    .traffic-table { width: 100%; border-collapse: collapse; font-size: 0.84rem; }
+    .traffic-table th, .traffic-table td { padding: 0.6rem; text-align: left; border-bottom: 1px solid rgba(255, 255, 255, 0.06); }
+    .traffic-table th { color: var(--text-muted); font-size: 0.75rem; text-transform: uppercase; }
+
+    /* Filter & Sort Toolbar */
     .toolbar {
       display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between;
       gap: 1rem; margin-bottom: 1.5rem;
     }
     .filter-btn {
-      background: rgba(255,255,255,0.04); border: 1px solid var(--card-border); color: var(--text-muted);
-      padding: 0.5rem 1rem; border-radius: 0.5rem; font-weight: 600; cursor: pointer;
+      background: rgba(255, 255, 255, 0.04); border: 1px solid var(--card-border); color: var(--text-muted);
+      padding: 0.5rem 1rem; border-radius: 8px; font-weight: 600; cursor: pointer; font-size: 0.85rem;
     }
-    .filter-btn.active { background: rgba(56,189,248,0.15); border-color: var(--accent-primary); color: var(--accent-primary); }
+    .filter-btn.active { background: rgba(56, 189, 248, 0.15); border-color: #38bdf8; color: #38bdf8; }
     .search-box, .sort-select {
       background: rgba(15, 23, 42, 0.8); border: 1px solid var(--card-border); color: var(--text-main);
-      padding: 0.55rem 0.9rem; border-radius: 0.5rem; font-size: 0.88rem;
+      padding: 0.55rem 0.9rem; border-radius: 8px; font-size: 0.86rem;
     }
 
     /* Repo Cards */
-    .repo-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(340px, 1fr)); gap: 1.25rem; }
+    .repo-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(360px, 1fr)); gap: 1.25rem; }
     .repo-card {
-      background: var(--card-bg); border: 1px solid var(--card-border); border-radius: 1rem;
-      padding: 1.35rem; display: flex; flex-direction: column; justify-content: space-between;
+      background: var(--card-bg); backdrop-filter: blur(16px); border: 1px solid var(--card-border);
+      border-radius: 16px; padding: 1.35rem; display: flex; flex-direction: column; justify-content: space-between;
       transition: all 0.2s ease;
     }
-    .repo-card:hover { transform: translateY(-3px); border-color: rgba(56,189,248,0.4); }
+    .repo-card:hover { transform: translateY(-3px); border-color: rgba(56, 189, 248, 0.4); }
+    .repo-header { display: flex; justify-content: space-between; align-items: flex-start; gap: 0.5rem; }
     .repo-name { font-size: 1.15rem; font-weight: 700; color: #bae6fd; text-decoration: none; }
-    .repo-desc { font-size: 0.84rem; color: var(--text-muted); margin: 0.6rem 0; min-height: 2.5rem; line-height: 1.4; }
-    .repo-metrics { display: flex; gap: 0.75rem; flex-wrap: wrap; margin-top: 0.75rem; }
-    .m-badge { font-size: 0.75rem; padding: 0.2rem 0.5rem; border-radius: 0.35rem; background: rgba(255,255,255,0.05); font-weight: 600; }
-    .health-bar { height: 5px; border-radius: 3px; background: rgba(255,255,255,0.1); overflow: hidden; margin-top: 0.5rem; }
-    .health-fill { height: 100%; border-radius: 3px; }
-    .topic-tag { font-size: 0.7rem; color: var(--accent-primary); background: rgba(56,189,248,0.08); padding: 0.15rem 0.4rem; border-radius: 0.25rem; display: inline-block; margin: 0.15rem; }
+    .badge-release {
+      font-size: 0.7rem; font-weight: 700; padding: 0.15rem 0.45rem; border-radius: 9999px;
+      background: rgba(52, 211, 153, 0.15); color: #34d399; border: 1px solid rgba(52, 211, 153, 0.3); margin-left: 0.35rem;
+    }
+    .badge-source { font-size: 0.7rem; font-weight: 700; padding: 0.15rem 0.45rem; border-radius: 9999px; background: rgba(56, 189, 248, 0.12); color: #38bdf8; }
+    .badge-fork { font-size: 0.7rem; font-weight: 700; padding: 0.15rem 0.45rem; border-radius: 9999px; background: rgba(192, 132, 252, 0.15); color: #c084fc; }
 
-    /* Tables */
-    .traffic-box { background: var(--card-bg); border: 1px solid var(--card-border); border-radius: 1rem; padding: 1.25rem; }
-    .traffic-table { width: 100%; border-collapse: collapse; font-size: 0.85rem; margin-top: 0.75rem; }
-    .traffic-table th, .traffic-table td { padding: 0.6rem; text-align: left; border-bottom: 1px solid rgba(255,255,255,0.06); }
-    .traffic-table th { color: var(--text-muted); font-weight: 600; }
+    /* Health Strip */
+    .repo-health-strip { margin: 0.65rem 0 0.5rem 0; cursor: help; }
+    .health-meta { display: flex; align-items: center; justify-content: space-between; font-size: 0.75rem; font-weight: 700; margin-bottom: 0.3rem; }
+    .health-bar-bg { height: 5px; border-radius: 3px; background: rgba(255, 255, 255, 0.08); overflow: hidden; }
+    .health-bar-fill { height: 100%; border-radius: 3px; }
 
-    .footer { text-align: center; color: var(--text-muted); font-size: 0.8rem; margin-top: 3.5rem; line-height: 1.6; }
+    .repo-desc { font-size: 0.84rem; color: var(--text-muted); margin: 0.5rem 0; min-height: 2.4rem; line-height: 1.4; }
+    .topic-tag { font-size: 0.7rem; color: #38bdf8; background: rgba(56, 189, 248, 0.08); padding: 0.15rem 0.4rem; border-radius: 4px; display: inline-block; margin: 0.15rem; }
+
+    .metrics-bar { display: flex; gap: 0.75rem; flex-wrap: wrap; margin-top: 0.85rem; padding-top: 0.75rem; border-top: 1px solid rgba(255, 255, 255, 0.06); }
+    .metric-item { display: flex; flex-direction: column; }
+    .metric-val { font-size: 0.88rem; font-weight: 700; font-family: 'JetBrains Mono', monospace; }
+    .metric-lbl { font-size: 0.68rem; color: var(--text-muted); text-transform: uppercase; }
+
+    .repo-conv-bar { display: flex; flex-wrap: wrap; gap: 0.35rem; margin-top: 0.65rem; }
+    .conv-tag {
+      font-size: 0.68rem; padding: 0.15rem 0.45rem; border-radius: 4px; font-weight: 600;
+      background: rgba(255, 255, 255, 0.04); color: #94a3b8; border: 1px solid rgba(255, 255, 255, 0.06);
+    }
+    .conv-tag.active { border-color: rgba(56, 189, 248, 0.3); color: #bae6fd; background: rgba(56, 189, 248, 0.08); }
+    .conv-persona { font-weight: 700; color: #c084fc; border-color: rgba(192, 132, 252, 0.3); background: rgba(192, 132, 252, 0.08); }
+
+    .repo-footer { display: flex; justify-content: space-between; align-items: center; margin-top: 0.75rem; font-size: 0.75rem; color: var(--text-muted); }
+
+    .footer { text-align: center; color: var(--text-muted); font-size: 0.8rem; margin-top: 4rem; line-height: 1.6; }
   </style>
 </head>
 <body>
   <div class="container">
     <header class="profile-banner">
-      <div class="profile-left">
+      <div class="profile-info">
         <img class="avatar" src="__USER_AVATAR__" alt="__USER_LOGIN__">
-        <div class="profile-info">
-          <h1>__USER_LOGIN__</h1>
-          <p class="profile-bio">__USER_BIO__</p>
+        <div>
+          <h1 class="profile-title">__USER_LOGIN__</h1>
+          <p style="color: var(--text-muted); font-size: 0.88rem; margin-top: 0.2rem;">__USER_BIO__</p>
+          <a class="profile-handle" href="https://github.com/__USER_LOGIN__" target="_blank" rel="noopener noreferrer">
+            github.com/__USER_LOGIN__ &nearr;
+          </a>
         </div>
       </div>
-      <div>
-        <span class="brand-badge">&#x26A1; GitMyRate Telemetry</span>
+      <div style="display: flex; gap: 0.75rem; align-items: center;">
+        <span class="brand-badge">&#x26A1; GitMyRate Vitals</span>
+        <button class="btn" onclick="toggleHistory()">&#x1F4DC; History Log</button>
       </div>
     </header>
 
@@ -778,77 +954,233 @@ $htmlTemplate = @'
       <div class="kpi-card">
         <div class="kpi-icon">&#x2B50;</div>
         <div>
-          <div class="kpi-val" style="color: var(--star-color);">__TOTAL_STARS____DELTA_STARS_HTML__</div>
-          <div class="kpi-lbl">Total Stars</div>
+          <div class="kpi-value" style="color: var(--star-color);">__TOTAL_STARS____DELTA_STARS_HTML__</div>
+          <div class="kpi-label">Total Stars</div>
         </div>
       </div>
 
       <div class="kpi-card">
         <div class="kpi-icon">&#x1F4E5;</div>
         <div>
-          <div class="kpi-val" style="color: var(--download-color);">__TOTAL_DOWNLOADS____DELTA_DOWNLOADS_HTML__</div>
-          <div class="kpi-lbl">Release Downloads</div>
+          <div class="kpi-value" style="color: var(--download-color);">__TOTAL_DOWNLOADS____DELTA_DOWNLOADS_HTML__</div>
+          <div class="kpi-label">Release Downloads</div>
         </div>
       </div>
 
       <div class="kpi-card">
         <div class="kpi-icon">&#x1F441;&#xFE0F;</div>
         <div>
-          <div class="kpi-val" style="color: var(--views-color);">__TOTAL_VIEWS_14D__</div>
-          <div class="kpi-lbl">14-Day Views</div>
+          <div class="kpi-value" style="color: var(--views-color);">__TOTAL_VIEWS_14D__</div>
+          <div class="kpi-label">14-Day Views</div>
+        </div>
+      </div>
+
+      <div class="kpi-card">
+        <div class="kpi-icon">&#x1F500;</div>
+        <div>
+          <div class="kpi-value" style="color: var(--fork-color);">__TOTAL_FORKS__</div>
+          <div class="kpi-label">Forks Count</div>
         </div>
       </div>
 
       <div class="kpi-card">
         <div class="kpi-icon">&#x1F4E6;</div>
         <div>
-          <div class="kpi-val">__TOTAL_REPOS__</div>
-          <div class="kpi-lbl">Public Repos</div>
+          <div class="kpi-value">__TOTAL_REPOS__</div>
+          <div class="kpi-label">Public Repos</div>
         </div>
       </div>
     </section>
 
-    <!-- Funnel -->
+    <!-- Funnel Section -->
     <section class="funnel-section">
-      <h2 style="font-size: 1.15rem; font-weight: 700; margin-bottom: 0.25rem;">&#x1F3AF; Git Conversion Rates &amp; Funnel Health</h2>
-      <p style="font-size: 0.8rem; color: var(--text-muted);">How effectively discovery turns into bookmarks, clones, and package downloads</p>
-      <div class="funnel-grid" id="funnel-container"></div>
+      <div class="funnel-header">
+        <div>
+          <h2 style="font-size: 1.2rem; font-weight: 700;">&#x1F3AF; Git Conversion Rates &amp; Funnel Health</h2>
+          <p style="font-size: 0.8rem; color: var(--text-muted); margin-top: 0.2rem;">
+            Measuring how effectively repository discovery turns into stars, clones, and downloads
+          </p>
+        </div>
+        <span class="brand-badge" style="font-size: 0.72rem;">&#x1F4CA; Engagement Analytics</span>
+      </div>
+
+      <div class="funnel-grid" id="funnel-cards-container"></div>
+      <div class="funnel-flow" id="funnel-flow-container"></div>
     </section>
 
-    <!-- Referrers & Clones -->
-    __TRAFFIC_HTML__
+    <!-- 14-Day & Lifetime Cumulative Bar Chart -->
+    <section class="chart-section">
+      <div class="chart-header">
+        <div>
+          <h2 style="font-size: 1.2rem; font-weight: 700;" id="main-chart-title">Traffic &amp; Views Activity</h2>
+          <p style="font-size: 0.8rem; color: var(--text-muted); margin-top: 0.2rem;" id="main-chart-subtitle">
+            Interactive 14-day rolling and lifetime cumulative counts
+          </p>
+        </div>
 
-    <!-- Toolbar -->
-    <div class="toolbar" style="margin-top: 2rem;">
+        <div class="chart-controls">
+          <div class="view-mode-group">
+            <button class="view-mode-btn active" id="btn-mode-rolling" onclick="setChartMode('rolling')">14-Day Rolling</button>
+            <button class="view-mode-btn" id="btn-mode-cumulative" onclick="setChartMode('cumulative')">&#x1F4C8; Lifetime Cumulative</button>
+            <button class="view-mode-btn" id="btn-mode-monthly" onclick="setChartMode('monthly')">Monthly</button>
+          </div>
+
+          <select id="chart-repo-select" class="chart-select">
+            <option value="combined">&#x1F310; Combined (All Repositories)</option>
+          </select>
+
+          <div style="display: flex; gap: 0.35rem;">
+            <button class="chart-metric-btn active" id="btn-chart-views" onclick="setChartMetric('views')">Views</button>
+            <button class="chart-metric-btn" id="btn-chart-uniques" onclick="setChartMetric('uniques')">Uniques</button>
+            <button class="chart-metric-btn" id="btn-chart-downloads" onclick="setChartMetric('downloads')">&#x1F4E5; DLs</button>
+          </div>
+        </div>
+      </div>
+
+      <div class="bars-container" id="bars-track"></div>
+      <div class="bars-x-axis" id="bars-axis"></div>
+
+      <div class="chart-summary-bar">
+        <div style="display: flex; gap: 1.5rem; flex-wrap: wrap;">
+          <div class="chart-stat-item">
+            <span>Period Total:</span>
+            <span class="chart-stat-val" id="chart-sum-total">0</span>
+          </div>
+          <div class="chart-stat-item">
+            <span>Daily Average:</span>
+            <span class="chart-stat-val" id="chart-sum-avg">0</span>
+          </div>
+          <div class="chart-stat-item">
+            <span>Peak Day:</span>
+            <span class="chart-stat-val" id="chart-sum-peak">-</span>
+          </div>
+        </div>
+        <div style="font-size: 0.78rem; color: #94a3b8;" id="chart-repo-note">
+          Showing combined metrics across all projects
+        </div>
+      </div>
+    </section>
+
+    <!-- History Drawer -->
+    <section class="history-card" id="history-drawer">
+      <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 0.75rem;">
+        <h3 style="font-size: 1rem; font-weight: 700; color: #bae6fd;">&#x1F4DC; Historical Growth Log (Local JSON Tracker)</h3>
+        <span style="font-size: 0.75rem; color: var(--text-muted);">Saved in <code>%LOCALAPPDATA%\GitMyRate\stats-history.json</code></span>
+      </div>
+      <div style="max-height: 240px; overflow-y: auto;">
+        <table class="history-table">
+          <thead>
+            <tr><th>Snapshot Date</th><th>Total Stars</th><th>Downloads</th><th>14d Views</th><th>Lifetime Total</th></tr>
+          </thead>
+          <tbody id="history-rows"></tbody>
+        </table>
+      </div>
+    </section>
+
+    <!-- Universal Web Buzz Radar -->
+    <section class="hubbub-section">
+      <div class="hubbub-header">
+        <div style="display: flex; align-items: center; gap: 0.5rem;">
+          <span style="font-size: 1.4rem;">&#x1F4E1;</span>
+          <h2 style="font-size: 1.15rem; font-weight: 700;">Web &amp; Community Buzz Radar</h2>
+          <span class="hubbub-badge">Live Scanner</span>
+        </div>
+        <span style="font-size: 0.8rem; color: var(--text-muted);">
+          1-Click discovery for web discussions, threads &amp; inbound links
+        </span>
+      </div>
+
+      <p style="font-size: 0.85rem; color: var(--text-muted); line-height: 1.5;">
+        Monitor where tech communities are discussing your projects (__RADAR_TERMS_DISPLAY__):
+      </p>
+
+      <div class="radar-grid">
+        <a class="radar-btn" href="https://github.com/search?q=__RADAR_QUERY_PLAIN__&type=discussions" target="_blank" rel="noopener noreferrer">
+          <div class="radar-icon" style="color: #c084fc;">&#x1F419;</div>
+          <div class="radar-meta">
+            <span class="radar-meta-title">GitHub Global Mentions</span>
+            <span class="radar-meta-sub">Discussions &amp; issues across GitHub</span>
+          </div>
+        </a>
+
+        <a class="radar-btn" href="https://hn.algolia.com/?q=__RADAR_QUERY_PLAIN__&sort=byDate" target="_blank" rel="noopener noreferrer">
+          <div class="radar-icon" style="color: #ff6600;">&#x1F4E2;</div>
+          <div class="radar-meta">
+            <span class="radar-meta-title">Hacker News</span>
+            <span class="radar-meta-sub">Posts &amp; comment threads</span>
+          </div>
+        </a>
+
+        <a class="radar-btn" href="https://www.reddit.com/search/?q=__RADAR_QUERY_QUOTED__&sort=new" target="_blank" rel="noopener noreferrer">
+          <div class="radar-icon" style="color: #ff4500;">&#x1F4AC;</div>
+          <div class="radar-meta">
+            <span class="radar-meta-title">Reddit Discussions</span>
+            <span class="radar-meta-sub">r/programming, r/opensource &amp; forums</span>
+          </div>
+        </a>
+
+        <a class="radar-btn" href="https://www.google.com/search?q=__RADAR_QUERY_QUOTED__&tbs=qdr:m" target="_blank" rel="noopener noreferrer">
+          <div class="radar-icon" style="color: #38bdf8;">&#x1F50E;</div>
+          <div class="radar-meta">
+            <span class="radar-meta-title">Google (Past 30d)</span>
+            <span class="radar-meta-sub">Recent indexed articles, blogs &amp; links</span>
+          </div>
+        </a>
+
+        <a class="radar-btn" href="https://www.google.com/alerts#create:q=__RADAR_QUERY_QUOTED__" target="_blank" rel="noopener noreferrer">
+          <div class="radar-icon" style="color: #34d399;">&#x1F514;</div>
+          <div class="radar-meta">
+            <span class="radar-meta-title">Google Alerts</span>
+            <span class="radar-meta-sub">Instant email notification when mentioned</span>
+          </div>
+        </a>
+      </div>
+
+      <!-- Inbound Referrers / Traffic Data -->
+      __TRAFFIC_HTML__
+    </section>
+
+    <!-- Filter & Sort Toolbar -->
+    <div class="toolbar">
       <div class="filter-group">
         <button class="filter-btn active" data-filter="all">All Projects (<span id="count-all">0</span>)</button>
         <button class="filter-btn" data-filter="source">Original (<span id="count-src">0</span>)</button>
         <button class="filter-btn" data-filter="fork">Forks (<span id="count-fork">0</span>)</button>
       </div>
 
-      <div style="display: flex; gap: 0.75rem;">
+      <div style="display: flex; gap: 0.75rem; align-items: center;">
         <input type="text" id="search-input" class="search-box" placeholder="Search repos, topics, license...">
         <select id="sort-select" class="sort-select">
           <option value="downloads">Sort by Downloads</option>
           <option value="health">Sort by Health Score &#x1F49A;</option>
+          <option value="starRate">Sort by Star Conv % &#x2B50;</option>
           <option value="views">Sort by 14-Day Views</option>
           <option value="stars">Sort by Stars</option>
+          <option value="pushed">Sort by Recently Pushed</option>
           <option value="name">Sort by Name</option>
         </select>
       </div>
     </div>
 
-    <!-- Repos Grid -->
+    <!-- Repository Cards Container -->
     <main class="repo-grid" id="repo-container"></main>
 
+    <!-- Footer -->
     <footer class="footer">
-      Generated automatically by <strong>GitMyRate</strong> &bull; Refreshed: __GENERATED_AT__<br>
-      Saved in <code>%LOCALAPPDATA%\GitMyRate</code> (bypassing GitHub's 14-day deletion limit).
+      Generated automatically by <strong>GitMyRate</strong> &bull; Last refreshed: __GENERATED_AT__<br>
+      <span style="opacity: 0.75; font-size: 0.78rem;">Historical snapshots archived in <code>%LOCALAPPDATA%\GitMyRate\stats-history.json</code> (bypassing GitHub's 14-day limit).</span>
     </footer>
   </div>
 
   <script>
     const repos = __REPOS_JSON__;
+    const rolling14Data = __ROLLING_14_JSON__;
+    const cumulativeYearData = __CUMULATIVE_YEAR_JSON__;
+    const byRepoDaily = __BY_REPO_DAILY_JSON__;
+    const allReleases = __RELEASES_JSON__;
+    const rawHistory = __HISTORY_JSON__;
+    const historyData = Array.isArray(rawHistory) ? rawHistory : (rawHistory ? [rawHistory] : []);
+
     if (Array.isArray(repos)) {
       repos.forEach(r => {
         r.Topics = Array.isArray(r.Topics) ? r.Topics : (r.Topics ? [r.Topics] : []);
@@ -866,73 +1198,558 @@ $htmlTemplate = @'
       });
     }
 
+    const languageColors = {
+      'C#': '#178600',
+      'PoSH': '#012456',
+      'HTML': '#e34c26',
+      'JavaScript': '#f1e05a',
+      'Python': '#3572A5',
+      'TypeScript': '#3178c6',
+      'General': '#64748b'
+    };
+
     let currentFilter = 'all';
     let currentSort = 'downloads';
     let searchQuery = '';
 
-    function calculateHealth(r) {
-      let score = 30; // base
-      if (r.Stars > 0) score += 15;
-      if (r.Downloads > 0 || r.Clones14Days > 0) score += 25;
-      if (r.Description && r.Description !== 'No description provided.') score += 15;
-      if (r.Topics && r.Topics.length > 0) score += 15;
-      score = Math.min(100, score);
+    let chartMode = 'rolling'; // 'rolling', 'cumulative', 'monthly'
+    let chartRepo = 'combined'; // 'combined' or repo name
+    let chartMetric = 'views';  // 'views', 'uniques', 'downloads'
 
-      let color = score >= 80 ? '#10b981' : (score >= 50 ? '#38bdf8' : '#fbbf24');
-      let status = score >= 80 ? 'Prime' : (score >= 50 ? 'Healthy' : 'Moderate');
-      return { score, color, status };
+    function formatDate(isoStr) {
+      if (!isoStr) return 'N/A';
+      const d = new Date(isoStr);
+      return d.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
     }
 
-    function renderFunnel() {
-      const container = document.getElementById('funnel-container');
-      if (!container) return;
+    function timeAgo(isoStr) {
+      if (!isoStr) return '';
+      const seconds = Math.floor((new Date() - new Date(isoStr)) / 1000);
+      let interval = Math.floor(seconds / 86400);
+      if (interval >= 1) return interval === 1 ? '1 day ago' : interval + ' days ago';
+      interval = Math.floor(seconds / 3600);
+      if (interval >= 1) return interval === 1 ? '1 hr ago' : interval + ' hrs ago';
+      interval = Math.floor(seconds / 60);
+      if (interval >= 1) return interval === 1 ? '1 min ago' : interval + ' mins ago';
+      return 'just now';
+    }
 
-      const totalStars = repos.reduce((a, b) => a + b.Stars, 0);
-      const totalDl = repos.reduce((a, b) => a + b.Downloads, 0);
-      const totalViews = Math.max(repos.reduce((a, b) => a + b.Views14Days, 0), 1);
-      const totalClones = repos.reduce((a, b) => a + b.Clones14Days, 0);
-      const uniqueClones = repos.reduce((a, b) => a + b.UniqueClones14Days, 0);
+    function toggleHistory() {
+      const drawer = document.getElementById('history-drawer');
+      const isVisible = drawer.style.display === 'block';
+      drawer.style.display = isVisible ? 'none' : 'block';
+      if (!isVisible) renderHistoryRows();
+    }
 
-      const starRate = ((totalStars / totalViews) * 100).toFixed(1);
-      const dlMultiplier = (totalDl / totalViews).toFixed(1);
+    function renderHistoryRows() {
+      const tbody = document.getElementById('history-rows');
+      if (!historyData || historyData.length === 0) {
+        tbody.innerHTML = '<tr><td colspan="5" style="text-align: center; color: #94a3b8;">No previous history records yet.</td></tr>';
+        return;
+      }
+      const reversed = [...historyData].reverse().slice(0, 20);
+      tbody.innerHTML = reversed.map(h => `
+        <tr>
+          <td><strong>${h.dateDisplay || formatDate(h.timestamp)}</strong></td>
+          <td style="color: var(--star-color);">&#x2B50; ${h.totalStars}</td>
+          <td style="color: var(--download-color);">&#x1F4E5; ${h.totalDownloads}</td>
+          <td style="color: var(--views-color);">&#x1F441;&#xFE0F; ${h.totalViews14d || 0}</td>
+          <td style="color: #34d399; font-weight: 600;">&#x1F4C8; ${h.yearCumulativeViews || h.totalViews14d || 0}</td>
+        </tr>
+      `).join('');
+    }
+
+    /* ------------------- INTERACTIVE CHART RENDERING ------------------- */
+    function updateChartTitles() {
+      const title = document.getElementById('main-chart-title');
+      const sub = document.getElementById('main-chart-subtitle');
+      const btnRolling = document.getElementById('btn-mode-rolling');
+      const btnCum = document.getElementById('btn-mode-cumulative');
+      const btnMonthly = document.getElementById('btn-mode-monthly');
+
+      if (chartMetric === 'downloads') {
+        btnRolling.innerText = '\u{1F4E6} By Release Package';
+        btnCum.innerText = '\u{1F4C8} Lifetime Cumulative';
+        btnMonthly.innerText = '\u{1F4C5} Monthly';
+
+        if (chartMode === 'rolling') {
+          title.innerText = '\u{1F4E6} Release Package Downloads';
+          sub.innerText = 'Total downloads breakdown per published release package';
+        } else if (chartMode === 'cumulative') {
+          title.innerText = '\u{1F4C8} Lifetime Downloads (Milestone Growth)';
+          sub.innerText = 'Milestone progression tracking all-time downloads as versions were released (counting up)';
+        } else if (chartMode === 'monthly') {
+          title.innerText = '\u{1F4C5} Monthly Package Downloads';
+          sub.innerText = 'Aggregated downloads by release calendar month';
+        }
+      } else {
+        btnRolling.innerText = '14-Day Rolling';
+        btnCum.innerText = '\u{1F4C8} Lifetime Cumulative';
+        btnMonthly.innerText = 'Monthly';
+
+        const metricName = chartMetric === 'views' ? 'Page Views' : 'Unique Visitors';
+        if (chartMode === 'rolling') {
+          title.innerText = `${metricName} (14-Day Rolling)`;
+          sub.innerText = 'Interactive day-by-day activity for the last two weeks';
+        } else if (chartMode === 'cumulative') {
+          title.innerText = `\u{1F4C8} Lifetime Cumulative ${metricName} (Counting Up)`;
+          sub.innerText = 'Continuous all-time growth timeline preserved permanently in local JSON archive';
+        } else if (chartMode === 'monthly') {
+          title.innerText = `Monthly ${metricName}`;
+          sub.innerText = 'Calendar month aggregations across all recorded days';
+        }
+      }
+
+      const note = document.getElementById('chart-repo-note');
+      if (chartRepo === 'combined') {
+        note.innerText = 'Showing combined metrics across all projects';
+      } else {
+        note.innerText = `Filtered specifically to ${chartRepo}`;
+      }
+    }
+
+    function initChartControls() {
+      const select = document.getElementById('chart-repo-select');
+      select.innerHTML = '<option value="combined">&#x1F310; Combined (All Repositories)</option>';
+      repos.forEach(r => {
+        const opt = document.createElement('option');
+        opt.value = r.Name;
+        opt.innerText = r.Name;
+        select.appendChild(opt);
+      });
+      select.addEventListener('change', (e) => {
+        chartRepo = e.target.value;
+        renderChart();
+      });
+    }
+
+    function setChartMode(mode) {
+      chartMode = mode;
+      document.querySelectorAll('.view-mode-btn').forEach(b => b.classList.remove('active'));
+      const activeBtn = document.getElementById(`btn-mode-${mode}`);
+      if (activeBtn) activeBtn.classList.add('active');
+      renderChart();
+    }
+
+    function setChartMetric(metric) {
+      chartMetric = metric;
+      document.querySelectorAll('.chart-metric-btn').forEach(b => b.classList.remove('active'));
+      const activeBtn = document.getElementById(`btn-chart-${metric}`);
+      if (activeBtn) activeBtn.classList.add('active');
+      renderChart();
+    }
+
+    function renderChart() {
+      updateChartTitles();
+      const track = document.getElementById('bars-track');
+      const axis = document.getElementById('bars-axis');
+      let dataPoints = [];
+
+      if (chartMetric === 'downloads') {
+        let rels = (chartRepo === 'combined')
+          ? allReleases
+          : allReleases.filter(r => r.repo.toLowerCase() === chartRepo.toLowerCase());
+
+        rels = [...rels].sort((a, b) => new Date(a.date) - new Date(b.date));
+
+        if (chartMode === 'rolling') {
+          const slice = rels.slice(-14);
+          dataPoints = slice.map(r => ({
+            label: r.tag,
+            value: r.downloads,
+            tooltip: `${r.repo} ${r.tag}: ${r.downloads} downloads (${r.date})`
+          }));
+        } else if (chartMode === 'cumulative') {
+          let runningDl = 0;
+          dataPoints = rels.map(r => {
+            runningDl += r.downloads;
+            return {
+              label: r.tag,
+              value: runningDl,
+              tooltip: `${r.repo} ${r.tag} Milestone: ${runningDl} cumulative downloads (${r.date})`
+            };
+          });
+          if (dataPoints.length > 20) dataPoints = dataPoints.slice(-20);
+        } else if (chartMode === 'monthly') {
+          const monthMap = {};
+          rels.forEach(r => {
+            const m = r.date.substring(0, 7);
+            monthMap[m] = (monthMap[m] || 0) + r.downloads;
+          });
+          dataPoints = Object.keys(monthMap).sort().map(m => ({
+            label: m,
+            value: monthMap[m],
+            tooltip: `${m}: ${monthMap[m]} downloads`
+          }));
+        }
+      } else {
+        if (chartMode === 'rolling') {
+          dataPoints = rolling14Data.map(d => {
+            let val = 0;
+            if (chartRepo === 'combined') {
+              val = chartMetric === 'views' ? d.views : d.uniques;
+            } else {
+              const repoDay = byRepoDaily[chartRepo] && byRepoDaily[chartRepo][d.date];
+              if (repoDay) val = chartMetric === 'views' ? repoDay.views : repoDay.uniques;
+            }
+            const dt = new Date(d.date + 'T00:00:00');
+            const lbl = dt.toLocaleDateString('en-US', { month: 'numeric', day: 'numeric' });
+            return {
+              label: lbl,
+              value: val,
+              tooltip: `${d.date}: ${val} ${chartMetric === 'views' ? 'views' : 'unique visitors'}`
+            };
+          });
+        } else if (chartMode === 'cumulative') {
+          let running = 0;
+          dataPoints = cumulativeYearData.map(d => {
+            let dayVal = 0;
+            if (chartRepo === 'combined') {
+              dayVal = chartMetric === 'views' ? d.dayViews : d.dayUniques;
+            } else {
+              const repoDay = byRepoDaily[chartRepo] && byRepoDaily[chartRepo][d.date];
+              if (repoDay) dayVal = chartMetric === 'views' ? repoDay.views : repoDay.uniques;
+            }
+            running += dayVal;
+            const dt = new Date(d.date + 'T00:00:00');
+            const lbl = dt.toLocaleDateString('en-US', { month: 'numeric', day: 'numeric' });
+            return {
+              label: lbl,
+              value: running,
+              tooltip: `${d.date}: ${running} cumulative ${chartMetric === 'views' ? 'views' : 'uniques'} (counting up)`
+            };
+          });
+          if (dataPoints.length > 25) {
+            const step = Math.ceil(dataPoints.length / 20);
+            dataPoints = dataPoints.filter((_, i) => i % step === 0 || i === dataPoints.length - 1);
+          }
+        } else if (chartMode === 'monthly') {
+          const monthMap = {};
+          cumulativeYearData.forEach(d => {
+            const m = d.date.substring(0, 7);
+            let dayVal = 0;
+            if (chartRepo === 'combined') {
+              dayVal = chartMetric === 'views' ? d.dayViews : d.dayUniques;
+            } else {
+              const repoDay = byRepoDaily[chartRepo] && byRepoDaily[chartRepo][d.date];
+              if (repoDay) dayVal = chartMetric === 'views' ? repoDay.views : repoDay.uniques;
+            }
+            monthMap[m] = (monthMap[m] || 0) + dayVal;
+          });
+          dataPoints = Object.keys(monthMap).sort().map(m => ({
+            label: m,
+            value: monthMap[m],
+            tooltip: `${m}: ${monthMap[m]} ${chartMetric === 'views' ? 'views' : 'uniques'}`
+          }));
+        }
+      }
+
+      if (dataPoints.length === 0) {
+        track.innerHTML = '<div style="margin: auto; color: #94a3b8; font-size: 0.85rem;">No activity data recorded yet for this view.</div>';
+        axis.innerHTML = '';
+        document.getElementById('chart-sum-total').innerText = '0';
+        document.getElementById('chart-sum-avg').innerText = '0';
+        document.getElementById('chart-sum-peak').innerText = '-';
+        return;
+      }
+
+      const maxVal = Math.max(...dataPoints.map(d => d.value), 1);
+      const sumVal = dataPoints.reduce((acc, d) => acc + d.value, 0);
+      const avgVal = (sumVal / dataPoints.length).toFixed(1);
+      const peakItem = dataPoints.reduce((max, d) => d.value > max.value ? d : max, dataPoints[0]);
+
+      document.getElementById('chart-sum-total').innerText = sumVal.toLocaleString();
+      document.getElementById('chart-sum-avg').innerText = avgVal;
+      document.getElementById('chart-sum-peak').innerText = `${peakItem.value} (${peakItem.label})`;
+
+      track.innerHTML = dataPoints.map(d => {
+        const pct = Math.max((d.value / maxVal) * 100, 3);
+        return `
+          <div class="bar-col" title="${d.tooltip}">
+            <div class="bar-fill" style="height: ${pct}%;"></div>
+          </div>
+        `;
+      }).join('');
+
+      axis.innerHTML = dataPoints.map(d => `<span class="x-label">${d.label}</span>`).join('');
+    }
+
+    /* ------------------- REPO HEALTH & CONVERSIONS LOGIC ------------------- */
+    function calculateRepoHealth(r) {
+      let score = 0;
+      let breakdown = [];
+
+      // 1. Recency & Maintenance (Max 30 pts)
+      const daysSincePush = r.PushedAt ? Math.floor((new Date() - new Date(r.PushedAt)) / (1000 * 86400)) : 999;
+      if (daysSincePush <= 14) {
+        score += 30;
+        breakdown.push({ label: 'Recent commit (≤ 14d)', pts: '+30' });
+      } else if (daysSincePush <= 30) {
+        score += 25;
+        breakdown.push({ label: 'Active commit (≤ 30d)', pts: '+25' });
+      } else if (daysSincePush <= 90) {
+        score += 18;
+        breakdown.push({ label: 'Committed (≤ 90d)', pts: '+18' });
+      } else if (daysSincePush <= 180) {
+        score += 10;
+        breakdown.push({ label: 'Committed (≤ 6mo)', pts: '+10' });
+      } else {
+        score += 5;
+        breakdown.push({ label: 'Stale (> 6mo)', pts: '+5' });
+      }
+
+      // 2. Packaging & Docs Hygiene (Max 30 pts)
+      let hygienePts = 0;
+      if (r.Description && r.Description !== 'No description provided.') hygienePts += 8;
+      if (r.License && r.License !== 'Custom' && r.License !== 'None') hygienePts += 8;
+      if (r.Topics && r.Topics.length > 0) hygienePts += 7;
+      if (r.ReleaseCount && r.ReleaseCount > 0) hygienePts += 7;
+      score += hygienePts;
+      breakdown.push({ label: 'Docs, License & Releases', pts: `+${hygienePts}/30` });
+
+      // 3. Traction & Adoption (Max 25 pts)
+      let tractionPts = 0;
+      if (r.Stars >= 5) tractionPts += 10;
+      else if (r.Stars >= 1) tractionPts += 7;
+      else tractionPts += 3;
+
+      if (r.Downloads >= 20 || r.Clones14Days >= 20) tractionPts += 15;
+      else if (r.Downloads > 0 || r.Clones14Days > 0) tractionPts += 10;
+      else tractionPts += 3;
+      score += tractionPts;
+      breakdown.push({ label: 'Stars, Clones & Downloads', pts: `+${tractionPts}/25` });
+
+      // 4. Issue Management (Max 15 pts)
+      let issuePts = 0;
+      if (r.OpenIssues === 0) issuePts = 15;
+      else if (r.OpenIssues <= 2) issuePts = 12;
+      else if (r.OpenIssues <= 5) issuePts = 8;
+      else issuePts = 4;
+      score += issuePts;
+      breakdown.push({ label: `Clean backlog (${r.OpenIssues} open)`, pts: `+${issuePts}/15` });
+
+      score = Math.min(Math.max(score, 0), 100);
+
+      let status = 'Healthy';
+      let color = '#34d399';
+      let bg = 'rgba(52, 211, 153, 0.15)';
+      let border = 'rgba(52, 211, 153, 0.3)';
+
+      if (score >= 85) {
+        status = 'Prime';
+        color = '#10b981';
+        bg = 'rgba(16, 185, 129, 0.15)';
+        border = 'rgba(16, 185, 129, 0.35)';
+      } else if (score >= 70) {
+        status = 'Healthy';
+        color = '#38bdf8';
+        bg = 'rgba(56, 189, 248, 0.15)';
+        border = 'rgba(56, 189, 248, 0.35)';
+      } else if (score >= 50) {
+        status = 'Moderate';
+        color = '#fbbf24';
+        bg = 'rgba(251, 191, 36, 0.15)';
+        border = 'rgba(251, 191, 36, 0.35)';
+      } else {
+        status = 'Attention';
+        color = '#f87171';
+        bg = 'rgba(248, 113, 113, 0.15)';
+        border = 'rgba(248, 113, 113, 0.35)';
+      }
+
+      return { score, status, color, bg, border, breakdown, daysSincePush };
+    }
+
+    function calculateRepoConversions(r) {
+      const views = Math.max(r.Views14Days || 0, 1);
+      const uniqueClones = r.UniqueClones14Days || 0;
+      const totalClones = r.Clones14Days || 0;
+      
       const botPulls = Math.max(0, totalClones - uniqueClones);
+      const botPercent = totalClones > 0 ? Math.round((botPulls / totalClones) * 100) : 0;
+      const cloneRepeat = uniqueClones > 0 ? (totalClones / uniqueClones).toFixed(1) : 1;
+
+      const cloneRateNum = Math.min(100, (uniqueClones / views) * 100);
+      const starRateNum = Math.min(100, (r.Stars / views) * 100);
+      const dlMultiplier = (r.Downloads / views).toFixed(1);
+      const dlRateNum = Math.min(100, (r.Downloads / Math.max(views, r.Downloads)) * 100);
+
+      let persona = 'Hybrid Dev/App';
+      let personaIcon = '&#x2696;&#xFE0F;';
+      if (totalClones > 0 && r.Downloads === 0) {
+        persona = 'Dev Code';
+        personaIcon = '&#x1F6E0;&#xFE0F;';
+      } else if (r.Downloads > 0 && r.Downloads >= totalClones) {
+        persona = 'App Utility';
+        personaIcon = '&#x1F4E6;';
+      } else if (totalClones > r.Downloads) {
+        persona = 'Dev Heavy';
+        personaIcon = '&#x1F4BB;';
+      } else if (r.Downloads > 0) {
+        persona = 'Dual Audience';
+        personaIcon = '&#x1F504;';
+      }
+
+      return {
+        dlRate: dlRateNum.toFixed(1),
+        dlMultiplier,
+        starRate: starRateNum.toFixed(1),
+        cloneRate: cloneRateNum.toFixed(1),
+        dlRateNum,
+        starRateNum,
+        cloneRateNum,
+        uniqueClones,
+        totalClones,
+        botPulls,
+        botPercent,
+        cloneRepeat,
+        persona,
+        personaIcon
+      };
+    }
+
+    function renderFunnelSection() {
+      const container = document.getElementById('funnel-cards-container');
+      const flow = document.getElementById('funnel-flow-container');
+      if (!container || !flow) return;
+
+      const totalStars = repos.reduce((acc, r) => acc + (r.Stars || 0), 0);
+      const totalDownloads = repos.reduce((acc, r) => acc + (r.Downloads || 0), 0);
+      const total14dClones = repos.reduce((acc, r) => acc + (r.Clones14Days || 0), 0);
+      const total14dUniqueClones = repos.reduce((acc, r) => acc + (r.UniqueClones14Days || 0), 0);
+      const total14dViews = Math.max(repos.reduce((acc, r) => acc + (r.Views14Days || 0), 0), 1);
+
+      let totalVisitors = 0;
+      if (cumulativeYearData && cumulativeYearData.length > 0) {
+        totalVisitors = cumulativeYearData.reduce((acc, d) => acc + (d.dayUniques || 0), 0);
+      }
+      if (totalVisitors === 0) {
+        totalVisitors = repos.reduce((acc, r) => acc + (r.Uniques14Days || 0), 0);
+      }
+      totalVisitors = Math.max(totalVisitors, total14dViews, 1);
+
+      const starRate = Math.min(100, ((totalStars / totalVisitors) * 100)).toFixed(1);
+      const dlMultiplier = (totalDownloads / totalVisitors).toFixed(1);
+
+      const botPullsTotal = Math.max(0, total14dClones - total14dUniqueClones);
+      const botPercentTotal = total14dClones > 0 ? Math.round((botPullsTotal / total14dClones) * 100) : 0;
+      const humanCloneRate = Math.min(100, ((total14dUniqueClones / total14dViews) * 100)).toFixed(1);
+
+      const isDevPersona = total14dClones >= totalDownloads;
+      const personaTitle = isDevPersona ? 'Developer & Infra' : 'Consumer Utility';
+      const personaPill = isDevPersona ? '&#x1F6E0;&#xFE0F; High Git Clones' : '&#x1F4E6; High Release DLs';
 
       container.innerHTML = `
         <div class="funnel-card">
-          <div style="color: #fbbf24; font-size: 0.8rem; font-weight: 700;">⭐ Star Conversion</div>
-          <div class="funnel-val" style="color: #fbbf24;">${starRate}%</div>
-          <div class="funnel-formula">${totalStars} stars &divide; ${totalViews} views</div>
-          <p class="funnel-desc">Visitors who bookmarked or starred your repositories.</p>
+          <div class="funnel-card-header">
+            <span class="funnel-card-label">Star Conversion</span>
+            <span class="funnel-pill" style="background: rgba(251, 191, 36, 0.15); color: #fbbf24;">README Appeal</span>
+          </div>
+          <div class="funnel-card-val" style="color: #fbbf24;">${starRate}%</div>
+          <div class="funnel-card-formula">${totalStars} stars &divide; ${totalVisitors} unique visitors</div>
+          <p class="funnel-card-desc">Percentage of visitors who intentionally bookmarked or starred your repositories.</p>
         </div>
 
         <div class="funnel-card">
-          <div style="color: #34d399; font-size: 0.8rem; font-weight: 700;">📦 Package Adoption</div>
-          <div class="funnel-val" style="color: #34d399;">${dlMultiplier}x</div>
-          <div class="funnel-formula">${totalDl} downloads &divide; ${totalViews} visitors</div>
-          <p class="funnel-desc">Average release packages downloaded per discovery visit.</p>
+          <div class="funnel-card-header">
+            <span class="funnel-card-label">Release Asset Adoption</span>
+            <span class="funnel-pill" style="background: rgba(52, 211, 153, 0.15); color: #34d399;">High Utility</span>
+          </div>
+          <div class="funnel-card-val" style="color: #34d399;">${dlMultiplier}x</div>
+          <div class="funnel-card-formula">${totalDownloads} downloads &divide; ${totalVisitors} visitors</div>
+          <p class="funnel-card-desc">Average release packages downloaded per discovery visitor (${dlMultiplier}x adoption).</p>
         </div>
 
         <div class="funnel-card">
-          <div style="color: #38bdf8; font-size: 0.8rem; font-weight: 700;">🚀 Developer Cloners</div>
-          <div class="funnel-val" style="color: #38bdf8;">${uniqueClones} <span style="font-size:0.8rem;">devs</span></div>
-          <div class="funnel-formula">${uniqueClones} unique machines pulled code</div>
-          <p class="funnel-desc">Developers who cloned the project locally to inspect or build.</p>
+          <div class="funnel-card-header">
+            <span class="funnel-card-label">Developer Cloners</span>
+            <span class="funnel-pill" style="background: rgba(56, 189, 248, 0.15); color: #38bdf8;">&#x1F464; Human Intent</span>
+          </div>
+          <div class="funnel-card-val" style="color: #38bdf8;">${total14dUniqueClones} <span style="font-size: 0.95rem; font-weight: 600; color: #94a3b8;">devs (${humanCloneRate}%)</span></div>
+          <div class="funnel-card-formula">${total14dUniqueClones} unique machines &divide; ${total14dViews} views (14d)</div>
+          <p class="funnel-card-desc">Distinct developers or machines that pulled the codebase to build or inspect locally.</p>
         </div>
 
         <div class="funnel-card">
-          <div style="color: #f87171; font-size: 0.8rem; font-weight: 700;">🤖 Automated / Bot Syncs</div>
-          <div class="funnel-val" style="color: #f87171;">${botPulls} <span style="font-size:0.8rem;">pulls</span></div>
-          <div class="funnel-formula">Filtered repeat daemon &amp; CI syncs</div>
-          <p class="funnel-desc">Automated build servers and repeat cron pulls separated from humans.</p>
+          <div class="funnel-card-header">
+            <span class="funnel-card-label">Robot &amp; CI Filter</span>
+            <span class="funnel-pill" style="background: rgba(248, 113, 113, 0.15); color: #f87171;">&#x1F916; ${botPercentTotal}% Automated</span>
+          </div>
+          <div class="funnel-card-val" style="color: #f87171;">${botPullsTotal} <span style="font-size: 0.95rem; font-weight: 600; color: #94a3b8;">auto pulls</span></div>
+          <div class="funnel-card-formula">${botPullsTotal} repeat cron/CI syncs filtered</div>
+          <p class="funnel-card-desc">Automated bot activity: cron jobs, Docker builds, and daemons checking updates.</p>
+        </div>
+
+        <div class="funnel-card">
+          <div class="funnel-card-header">
+            <span class="funnel-card-label">Audience Persona</span>
+            <span class="funnel-pill" style="background: rgba(129, 140, 248, 0.15); color: #818cf8;">Profile</span>
+          </div>
+          <div class="funnel-card-val" style="color: #818cf8; font-size: 1.45rem;">${personaTitle}</div>
+          <div class="funnel-card-formula">${personaPill}</div>
+          <p class="funnel-card-desc">Audience breakdown based on Git clone vs release package ratio.</p>
+        </div>
+      `;
+
+      flow.innerHTML = `
+        <div class="funnel-stage">
+          <div class="stage-pill" style="border: 1px solid rgba(56, 189, 248, 0.3); color: #bae6fd;">
+            &#x1F441;&#xFE0F; <strong>${totalVisitors}</strong> Visitors (100%)
+          </div>
+        </div>
+        <span class="funnel-arrow">&xrarr;</span>
+
+        <div class="funnel-stage">
+          <div class="stage-pill" style="border: 1px solid rgba(56, 189, 248, 0.3); color: #38bdf8;" title="Distinct developers pulling code">
+            &#x1F464; <strong>${total14dUniqueClones}</strong> Devs (${humanCloneRate}%)
+          </div>
+        </div>
+        <span class="funnel-arrow">&xrarr;</span>
+
+        <div class="funnel-stage">
+          <div class="stage-pill" style="border: 1px solid rgba(52, 211, 153, 0.3); color: #34d399;" title="Release Downloads">
+            &#x1F4E5; <strong>${totalDownloads}</strong> Downloads (${dlMultiplier}x)
+          </div>
+        </div>
+        <span class="funnel-arrow">&xrarr;</span>
+
+        <div class="funnel-stage">
+          <div class="stage-pill" style="border: 1px solid rgba(251, 191, 36, 0.3); color: #fbbf24;" title="Stars Bookmarked">
+            &#x2B50; <strong>${totalStars}</strong> Stars (${starRate}%)
+          </div>
+        </div>
+        <span class="funnel-arrow">&xrarr;</span>
+
+        <div class="funnel-stage">
+          <div class="stage-pill" style="border: 1px solid rgba(248, 113, 113, 0.3); color: #f87171;" title="Robot Filter: Automated repeat syncs">
+            &#x1F916; <strong>${botPullsTotal}</strong> Bot/Cron Pulls (${botPercentTotal}% auto)
+          </div>
         </div>
       `;
     }
 
+    /* ------------------- REPO CARDS RENDERING ------------------- */
     function render() {
       const container = document.getElementById('repo-container');
-      document.getElementById('count-all').innerText = repos.length;
-      document.getElementById('count-src').innerText = repos.filter(r => !r.IsFork).length;
-      document.getElementById('count-fork').innerText = repos.filter(r => r.IsFork).length;
+      
+      const hasForks = repos.some(r => r.IsFork);
+      const forkBtn = document.querySelector('[data-filter="fork"]');
+      const srcBtn = document.querySelector('[data-filter="source"]');
+      const allBtn = document.querySelector('[data-filter="all"]');
+      
+      if (!hasForks) {
+        if (forkBtn) forkBtn.style.display = 'none';
+        if (srcBtn) srcBtn.style.display = 'none';
+        if (allBtn) {
+          allBtn.classList.add('active');
+          allBtn.innerHTML = `All Projects (<span id="count-all">${repos.length}</span>)`;
+        }
+        currentFilter = 'all';
+      } else {
+        if (document.getElementById('count-all')) document.getElementById('count-all').innerText = repos.length;
+        if (document.getElementById('count-src')) document.getElementById('count-src').innerText = repos.filter(r => !r.IsFork).length;
+        if (document.getElementById('count-fork')) document.getElementById('count-fork').innerText = repos.filter(r => r.IsFork).length;
+      }
 
       let filtered = repos.filter(r => {
         if (currentFilter === 'source' && r.IsFork) return false;
@@ -942,52 +1759,123 @@ $htmlTemplate = @'
           const matchName = (r.Name || '').toLowerCase().includes(q);
           const matchDesc = (r.Description || '').toLowerCase().includes(q);
           const matchTopics = (r.Topics || []).some(t => String(t).toLowerCase().includes(q));
-          return matchName || matchDesc || matchTopics;
+          const matchLang = (r.Language || '').toLowerCase().includes(q);
+          const matchLicense = (r.License || '').toLowerCase().includes(q);
+          return matchName || matchDesc || matchTopics || matchLang || matchLicense;
         }
         return true;
       });
 
       filtered.sort((a, b) => {
         if (currentSort === 'downloads') return b.Downloads - a.Downloads || b.Stars - a.Stars;
-        if (currentSort === 'health') return calculateHealth(b).score - calculateHealth(a).score;
-        if (currentSort === 'views') return b.Views14Days - a.Views14Days;
-        if (currentSort === 'stars') return b.Stars - a.Stars;
+        if (currentSort === 'health') return calculateRepoHealth(b).score - calculateRepoHealth(a).score || b.Downloads - a.Downloads;
+        if (currentSort === 'starRate') return calculateRepoConversions(b).starRateNum - calculateRepoConversions(a).starRateNum || b.Stars - a.Stars;
+        if (currentSort === 'views') return b.Views14Days - a.Views14Days || b.Downloads - a.Downloads;
+        if (currentSort === 'stars') return b.Stars - a.Stars || b.Downloads - a.Downloads;
+        if (currentSort === 'pushed') return new Date(b.PushedAt) - new Date(a.PushedAt);
         if (currentSort === 'name') return a.Name.localeCompare(b.Name);
         return 0;
       });
 
       if (filtered.length === 0) {
-        container.innerHTML = '<div style="grid-column: 1/-1; text-align: center; padding: 3rem; color: #94a3b8;">No projects found.</div>';
+        container.innerHTML = '<div style="grid-column: 1/-1; text-align: center; padding: 4rem; color: #94a3b8;">No repositories matched your filters.</div>';
         return;
       }
 
       container.innerHTML = filtered.map(r => {
-        const h = calculateHealth(r);
+        const langColor = languageColors[r.Language] || '#38bdf8';
         const topics = Array.isArray(r.Topics) ? r.Topics : [];
-        const topicsHtml = topics.slice(0, 5).map(t => `<span class="topic-tag">#${t}</span>`).join('');
+        const topicsHtml = topics.slice(0, 6).map(t => `<span class="topic-tag">#${t}</span>`).join('');
+        const extraTopics = topics.length > 6 ? `<span class="topic-tag">+${topics.length - 6}</span>` : '';
+        const badge = r.IsFork 
+          ? `<span class="badge-fork">&#x1F500; Fork</span>` 
+          : `<span class="badge-source">&#x2728; Original</span>`;
+
+        const releaseBadge = r.LatestReleaseTag 
+          ? `<span class="badge-release" title="Latest release: ${r.LatestReleaseTag}">&#x1F4E6; ${r.LatestReleaseTag}</span>` 
+          : '';
+
+        const licenseBadge = r.License ? `<span class="badge-license" title="License: ${r.License}">${r.License}</span>` : '';
+
+        const h = calculateRepoHealth(r);
+        const b1 = (h.breakdown && h.breakdown[1]) ? h.breakdown[1].pts : '';
+        const b2 = (h.breakdown && h.breakdown[2]) ? h.breakdown[2].pts : '';
+        const b3 = (h.breakdown && h.breakdown[3]) ? h.breakdown[3].pts : '';
+        const healthTooltip = `${r.Name} Repository Health: ${h.score}/100 (${h.status})&#10;&bull; Last push: ${h.daysSincePush <= 14 ? 'Recent (≤14d)' : h.daysSincePush + 'd ago'}&#10;&bull; Hygiene: ${b1}&#10;&bull; Traction: ${b2}&#10;&bull; Backlog: ${b3}`;
+
+        const conv = calculateRepoConversions(r);
 
         return `
           <div class="repo-card">
             <div>
-              <div style="display: flex; justify-content: space-between; align-items: flex-start; gap: 0.5rem;">
-                <a class="repo-name" href="${r.HtmlUrl}" target="_blank" rel="noopener noreferrer">${r.Name}</a>
-                <span style="font-size: 0.72rem; color: ${h.color}; font-weight: 700;">${h.score}% (${h.status})</span>
+              <div class="repo-header">
+                <div style="display: flex; align-items: center; flex-wrap: wrap; gap: 0.4rem;">
+                  <a class="repo-name" href="${r.HtmlUrl}" target="_blank" rel="noopener noreferrer">${r.Name}</a>
+                  ${badge}
+                  ${releaseBadge}
+                </div>
               </div>
-              <div class="health-bar"><div class="health-fill" style="width: ${h.score}%; background: ${h.color};"></div></div>
-              <p class="repo-desc">${r.Description || 'No description.'}</p>
-              <div>${topicsHtml}</div>
+
+              <!-- Health Meter -->
+              <div class="repo-health-strip" title="${healthTooltip}">
+                <div class="health-meta">
+                  <span style="color: ${h.color};">${h.score}% Health</span>
+                  <span style="color: ${h.color}; font-size: 0.7rem; padding: 0.1rem 0.4rem; border-radius: 4px; background: ${h.bg}; border: 1px solid ${h.border};">${h.status}</span>
+                </div>
+                <div class="health-bar-bg" title="Health Score: ${h.score}%">
+                  <div class="health-bar-fill" style="width: ${h.score}%; background: ${h.color};"></div>
+                </div>
+              </div>
+
+              <p class="repo-desc" title="${r.Description}">${r.Description}</p>
+
+              <div>
+                ${topicsHtml} ${extraTopics}
+              </div>
             </div>
 
             <div>
-              <div class="repo-metrics">
-                <span class="m-badge" style="color: #fbbf24;">⭐ ${r.Stars}</span>
-                <span class="m-badge" style="color: #34d399;">📦 ${r.Downloads} DLs</span>
-                <span class="m-badge" style="color: #38bdf8;">👁️ ${r.Views14Days} (14d)</span>
-                <span class="m-badge" style="color: #c084fc;">🍴 ${r.Forks}</span>
+              <div class="metrics-bar">
+                <div class="metric-item">
+                  <span class="metric-val" style="color: #fbbf24;">&#x2B50; ${r.Stars}</span>
+                  <span class="metric-lbl">Stars</span>
+                </div>
+                <div class="metric-item" title="${r.ReleaseCount} releases total">
+                  <span class="metric-val" style="color: #34d399;">&#x1F4E5; ${r.Downloads}</span>
+                  <span class="metric-lbl">Downloads</span>
+                </div>
+                <div class="metric-item" title="14-day page views (${r.Uniques14Days} unique visitors)">
+                  <span class="metric-val" style="color: #38bdf8;">&#x1F441;&#xFE0F; ${r.Views14Days}</span>
+                  <span class="metric-lbl">14d Views</span>
+                </div>
+                <div class="metric-item">
+                  <span class="metric-val" style="color: #c084fc;">&#x1F500; ${r.Forks}</span>
+                  <span class="metric-lbl">Forks</span>
+                </div>
+                <div class="metric-item">
+                  <span class="metric-val" style="color: #f87171;">&#x25C9; ${r.OpenIssues}</span>
+                  <span class="metric-lbl">Issues</span>
+                </div>
               </div>
-              <div style="display: flex; justify-content: space-between; margin-top: 0.75rem; font-size: 0.75rem; color: var(--text-muted);">
-                <span>${r.Language}</span>
-                <span>${r.SizeFormatted}</span>
+
+              <div class="repo-conv-bar">
+                <span class="conv-tag ${conv.starRateNum > 0 ? 'active' : ''}" title="Star Conversion: ${conv.starRate}% of visitors starred this repo">&#x2B50; ${conv.starRate}% Star Conv</span>
+                <span class="conv-tag ${conv.dlRateNum > 0 ? 'active' : ''}" title="Release Downloads: ${r.Downloads} packages (${conv.dlMultiplier}x per visitor)">&#x1F4E5; ${r.Downloads} DLs (${conv.dlMultiplier}x)</span>
+                <span class="conv-tag ${conv.cloneRateNum > 0 ? 'active' : ''}" title="Unique Dev Clones: ${conv.uniqueClones} unique devs (${conv.totalClones} total pulls &bull; ${conv.botPercent}% automated)">&#x1F680; ${conv.uniqueClones} Devs <span style="opacity:0.65;font-size:0.62rem;">(+${conv.botPulls} &#x1F916;)</span></span>
+                <span class="conv-tag conv-persona" title="Audience Classification">${conv.personaIcon} ${conv.persona}</span>
+              </div>
+
+              <div class="repo-footer">
+                <div style="display: flex; align-items: center; gap: 0.5rem;">
+                  <span style="display: inline-block; width: 8px; height: 8px; border-radius: 50%; background: ${langColor};"></span>
+                  <span>${r.Language}</span>
+                  ${licenseBadge}
+                </div>
+                <div>
+                  <span>${r.SizeFormatted}</span>
+                  <span style="margin: 0 0.3rem;">&bull;</span>
+                  <span title="${formatDate(r.PushedAt)}">Updated ${timeAgo(r.PushedAt)}</span>
+                </div>
               </div>
             </div>
           </div>
@@ -1014,7 +1902,9 @@ $htmlTemplate = @'
       render();
     });
 
-    renderFunnel();
+    initChartControls();
+    renderChart();
+    renderFunnelSection();
     render();
   </script>
 </body>
@@ -1031,10 +1921,19 @@ $htmlContent = $htmlTemplate `
     -replace '__TOTAL_DOWNLOADS__', $totalDownloads `
     -replace '__DELTA_DOWNLOADS_HTML__', $deltaDownloadsHtml `
     -replace '__TOTAL_VIEWS_14D__', $total14DayViews `
+    -replace '__TOTAL_FORKS__', $totalForks `
     -replace '__TOTAL_REPOS__', $analyzedRepos.Count `
     -replace '__TRAFFIC_HTML__', $trafficHtml `
+    -replace '__RADAR_QUERY_QUOTED__', $radarQueryQuoted `
+    -replace '__RADAR_QUERY_PLAIN__', $radarQueryPlain `
+    -replace '__RADAR_TERMS_DISPLAY__', $radarTermsDisplay `
     -replace '__GENERATED_AT__', $generatedAt `
-    -replace '__REPOS_JSON__', $reposJson
+    -replace '__REPOS_JSON__', $reposJson `
+    -replace '__ROLLING_14_JSON__', $rolling14Json `
+    -replace '__CUMULATIVE_YEAR_JSON__', $cumulativeYearJson `
+    -replace '__BY_REPO_DAILY_JSON__', $byRepoDailyJson `
+    -replace '__RELEASES_JSON__', $allReleasesJson `
+    -replace '__HISTORY_JSON__', $historyCompressed
 
 Set-Content -Path $reportFile -Value $htmlContent -Encoding UTF8
 
