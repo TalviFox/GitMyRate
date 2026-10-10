@@ -1,4 +1,4 @@
-<#
+﻿<#
 .SYNOPSIS
     GitMyRate - Zero-Install GitHub Conversion Rates, Traffic Radar & Lifetime Analytics
     Hosted IEX Suite with Local DPAPI Hardware-Locked Encryption & Desktop Shortcut
@@ -12,15 +12,15 @@
 
 [CmdletBinding()]
 param(
-    [Parameter(Position=0)]
-    [string]$TargetUsername,
+  [Parameter(Position = 0)]
+  [string]$TargetUsername,
 
-    [string]$Token,
-    [switch]$Force,
-    [switch]$NoBrowser,
-    [switch]$CreateShortcut,
-    [switch]$Reset,
-    [switch]$ResetToken
+  [string]$Token,
+  [switch]$Force,
+  [switch]$NoBrowser,
+  [switch]$CreateShortcut,
+  [switch]$Reset,
+  [switch]$ResetToken
 )
 
 $ErrorActionPreference = 'Stop'
@@ -28,16 +28,16 @@ $ErrorActionPreference = 'Stop'
 # Define persistent storage in LocalAppData
 $appDataDir = Join-Path -Path $env:LOCALAPPDATA -ChildPath "GitMyRate"
 if (-not (Test-Path -Path $appDataDir)) {
-    New-Item -ItemType Directory -Path $appDataDir -Force | Out-Null
+  New-Item -ItemType Directory -Path $appDataDir -Force | Out-Null
 }
 
-$configFile     = Join-Path -Path $appDataDir -ChildPath "config.json"
-$tokenFile      = Join-Path -Path $appDataDir -ChildPath "token.enc"
-$historyFile    = Join-Path -Path $appDataDir -ChildPath "stats-history.json"
-$yearlyFile     = Join-Path -Path $appDataDir -ChildPath "yearly-traffic.json"
-$reportFile     = Join-Path -Path $appDataDir -ChildPath "dashboard.html"
-$avatarIco      = Join-Path -Path $appDataDir -ChildPath "avatar.ico"
-$launcherPs1    = Join-Path -Path $appDataDir -ChildPath "launcher.ps1"
+$configFile = Join-Path -Path $appDataDir -ChildPath "config.json"
+$tokenFile = Join-Path -Path $appDataDir -ChildPath "token.enc"
+$historyFile = Join-Path -Path $appDataDir -ChildPath "stats-history.json"
+$yearlyFile = Join-Path -Path $appDataDir -ChildPath "yearly-traffic.json"
+$reportFile = Join-Path -Path $appDataDir -ChildPath "dashboard.html"
+$avatarIco = Join-Path -Path $appDataDir -ChildPath "avatar.ico"
+$launcherPs1 = Join-Path -Path $appDataDir -ChildPath "launcher.ps1"
 $migratedMarker = Join-Path -Path $appDataDir -ChildPath ".migrated"
 
 Write-Host ""
@@ -48,119 +48,109 @@ Write-Host ""
 
 # Handle --ResetToken switch
 if ($ResetToken) {
-    if (Test-Path $tokenFile) {
-        Remove-Item $tokenFile -Force -ErrorAction SilentlyContinue
-    }
-    Write-Host "  [+] Stored GitHub token removed. You will be prompted for a new token." -ForegroundColor Green
+  if (Test-Path $tokenFile) {
+    Remove-Item $tokenFile -Force -ErrorAction SilentlyContinue
+  }
+  Write-Host "  [+] Stored GitHub token removed. You will be prompted for a new token." -ForegroundColor Green
 }
 
 # Handle --Reset switch
 if ($Reset) {
-    Write-Host "  [*] Wiping all GitMyRate local cache, history, and credentials..." -ForegroundColor Yellow
-    if (Test-Path $appDataDir) {
-        Remove-Item "$appDataDir\*" -Recurse -Force -ErrorAction SilentlyContinue
-    }
-    # Create migrated marker so it doesn't auto-resurrect old deleted credentials
-    Set-Content -Path $migratedMarker -Value "migrated" -Encoding UTF8
-    Write-Host "  [+] GitMyRate cache completely wiped from $appDataDir." -ForegroundColor Green
-    return
+  Write-Host "  [*] Wiping all GitMyRate local cache, history, and credentials..." -ForegroundColor Yellow
+  if (Test-Path $appDataDir) {
+    Remove-Item "$appDataDir\*" -Recurse -Force -ErrorAction SilentlyContinue
+  }
+  # Create migrated marker so it doesn't auto-resurrect old deleted credentials
+  Set-Content -Path $migratedMarker -Value "migrated" -Encoding UTF8
+  Write-Host "  [+] GitMyRate cache completely wiped from $appDataDir." -ForegroundColor Green
+  return
 }
 
 # Load saved configuration if available
 $config = @{}
 if (Test-Path -Path $configFile) {
-    try {
-        $config = Get-Content -Path $configFile -Raw | ConvertFrom-Json -AsHashtable
-    } catch {
-        $config = @{}
-    }
+  try {
+    $config = Get-Content -Path $configFile -Raw | ConvertFrom-Json -AsHashtable
+  }
+  catch {
+    $config = @{}
+  }
 }
 
 # Auto-discover existing local dashboard data (Desktop migration - ONE TIME ONLY)
 if (-not (Test-Path -Path $migratedMarker) -and -not (Test-Path -Path $configFile)) {
-    $possibleLegacyDirs = @(
-        (Get-Location).Path,
-        (Join-Path ([Environment]::GetFolderPath("Desktop")) "TalviFox Dashboard"),
-        (Join-Path $env:USERPROFILE "Desktop\TalviFox Dashboard")
-    ) | Select-Object -Unique
+  $possibleLegacyDirs = @(
+    (Get-Location).Path
+  ) | Select-Object -Unique
 
-    foreach ($ld in $possibleLegacyDirs) {
-        if (Test-Path $ld) {
-            # Check for legacy token
-            $legToken = Join-Path $ld "github-token.txt"
-            if ((Test-Path $legToken) -and (-not (Test-Path $tokenFile))) {
-                $rawToken = (Get-Content $legToken -Raw).Trim()
-                if (-not [string]::IsNullOrWhiteSpace($rawToken)) {
-                    $sec = ConvertTo-SecureString $rawToken -AsPlainText -Force
-                    $enc = ConvertFrom-SecureString $sec
-                    Set-Content -Path $tokenFile -Value $enc -Encoding UTF8
-                    Write-Host "  [+] Discovered and encrypted existing GitHub token from '$ld'." -ForegroundColor Green
-                }
-            }
-            # Check for history
-            $legHist = Join-Path $ld "stats-history.json"
-            if ((Test-Path $legHist) -and (-not (Test-Path $historyFile))) {
-                Copy-Item $legHist $historyFile -Force
-                Write-Host "  [+] Migrated historical stats-history.json into GitMyRate." -ForegroundColor Green
-            }
-            # Check for yearly traffic
-            $legYear = Join-Path $ld "yearly-traffic.json"
-            if ((Test-Path $legYear) -and (-not (Test-Path $yearlyFile))) {
-                Copy-Item $legYear $yearlyFile -Force
-                Write-Host "  [+] Migrated yearly-traffic.json archive into GitMyRate." -ForegroundColor Green
-            }
+  foreach ($ld in $possibleLegacyDirs) {
+    if (Test-Path $ld) {
+      # Check for legacy token
+      $legToken = Join-Path $ld "github-token.txt"
+      if ((Test-Path $legToken) -and (-not (Test-Path $tokenFile))) {
+        $rawToken = (Get-Content $legToken -Raw).Trim()
+        if (-not [string]::IsNullOrWhiteSpace($rawToken)) {
+          $sec = ConvertTo-SecureString $rawToken -AsPlainText -Force
+          $enc = ConvertFrom-SecureString $sec
+          Set-Content -Path $tokenFile -Value $enc -Encoding UTF8
+          Write-Host "  [+] Discovered and encrypted existing GitHub token from '$ld'." -ForegroundColor Green
         }
+      }
+      # Check for history
+      $legHist = Join-Path $ld "stats-history.json"
+      if ((Test-Path $legHist) -and (-not (Test-Path $historyFile))) {
+        Copy-Item $legHist $historyFile -Force
+        Write-Host "  [+] Migrated historical stats-history.json into GitMyRate." -ForegroundColor Green
+      }
+      # Check for yearly traffic
+      $legYear = Join-Path $ld "yearly-traffic.json"
+      if ((Test-Path $legYear) -and (-not (Test-Path $yearlyFile))) {
+        Copy-Item $legYear $yearlyFile -Force
+        Write-Host "  [+] Migrated yearly-traffic.json archive into GitMyRate." -ForegroundColor Green
+      }
     }
-    Set-Content -Path $migratedMarker -Value "migrated" -Encoding UTF8
+  }
+  Set-Content -Path $migratedMarker -Value "migrated" -Encoding UTF8
 }
-
-# Determine GitHub Username
-$Username = $TargetUsername
-if ([string]::IsNullOrWhiteSpace($Username)) {
-    if ($config.ContainsKey('Username') -and -not [string]::IsNullOrWhiteSpace($config['Username'])) {
-        $Username = $config['Username']
-    } else {
-        $detectedUser = ""
-        try {
-            $detectedUser = (git config --get user.name) 2>$null
-        } catch {}
-
-        $defaultUser = if (-not [string]::IsNullOrWhiteSpace($detectedUser)) { $detectedUser } else { "TalviFox" }
-        Write-Host -NoNewline "  ? Enter GitHub Username [default: $defaultUser]: " -ForegroundColor Yellow
-        $inputUser = [Console]::ReadLine()
-        if ([string]::IsNullOrWhiteSpace($inputUser)) {
-            $Username = $defaultUser
-        } else {
-            $Username = $inputUser.Trim()
-        }
-    }
-}
-
-# Save resolved username
-$config['Username'] = $Username
-$config | ConvertTo-Json | Set-Content -Path $configFile -Encoding UTF8
 
 # Resolve Token (DPAPI-encrypted local storage)
 $resolvedToken = ""
 if (-not [string]::IsNullOrWhiteSpace($Token)) {
-    $resolvedToken = $Token
+  $resolvedToken = $Token
+  try {
+    $sec = ConvertTo-SecureString $resolvedToken -AsPlainText -Force
+    $enc = ConvertFrom-SecureString $sec
+    Set-Content -Path $tokenFile -Value $enc -Encoding UTF8
+    Write-Host "  [+] New token encrypted and saved to Windows DPAPI storage." -ForegroundColor Green
+  }
+  catch {}
+}
+elseif (Test-Path -Path $tokenFile) {
+  try {
+    $enc = Get-Content -Path $tokenFile -Raw
+    $sec = ConvertTo-SecureString $enc
+    $bstr = [System.Runtime.InteropServices.Marshal]::SecureStringToBSTR($sec)
+    $resolvedToken = [System.Runtime.InteropServices.Marshal]::PtrToStringAuto($bstr)
+    [System.Runtime.InteropServices.Marshal]::ZeroFreeBSTR($bstr)
+  }
+  catch {
+    Write-Host "  [!] Could not decrypt saved token. Continuing in public mode." -ForegroundColor DarkYellow
+  }
+}
+else {
+  # Check if legacy token exists in working directory
+  $legacyTokenPath = Join-Path (Get-Location) "github-token.txt"
+  if (Test-Path $legacyTokenPath) {
+    $resolvedToken = (Get-Content $legacyTokenPath -Raw).Trim()
     try {
-        $sec = ConvertTo-SecureString $resolvedToken -AsPlainText -Force
-        $enc = ConvertFrom-SecureString $sec
-        Set-Content -Path $tokenFile -Value $enc -Encoding UTF8
-        Write-Host "  [+] New token encrypted and saved to Windows DPAPI storage." -ForegroundColor Green
-    } catch {}
-} elseif (Test-Path -Path $tokenFile) {
-    try {
-        $enc = Get-Content -Path $tokenFile -Raw
-        $sec = ConvertTo-SecureString $enc
-        $bstr = [System.Runtime.InteropServices.Marshal]::SecureStringToBSTR($sec)
-        $resolvedToken = [System.Runtime.InteropServices.Marshal]::PtrToStringAuto($bstr)
-        [System.Runtime.InteropServices.Marshal]::ZeroFreeBSTR($bstr)
-    } catch {
-        Write-Host "  [!] Could not decrypt saved token. Continuing in public mode." -ForegroundColor DarkYellow
+      $sec = ConvertTo-SecureString $resolvedToken -AsPlainText -Force
+      $enc = ConvertFrom-SecureString $sec
+      Set-Content -Path $tokenFile -Value $enc -Encoding UTF8
+      Write-Host "  [+] Imported and encrypted existing token into Windows DPAPI storage." -ForegroundColor Green
     }
-} else {
+    catch {}
+  }
+  else {
     Write-Host ""
     Write-Host "  [Key Setup] Optional GitHub Personal Access Token" -ForegroundColor Gray
     Write-Host "  - Private visitor views, clones, and referrers require a token." -ForegroundColor DarkGray
@@ -168,114 +158,179 @@ if (-not [string]::IsNullOrWhiteSpace($Token)) {
     Write-Host "  - Press Enter to skip and continue in public mode (60 requests/hr)." -ForegroundColor DarkGray
     Write-Host ""
     try {
-        $secInput = Read-Host -Prompt "  Paste GitHub Token (hidden, press Enter to skip)" -AsSecureString
-        $bstr = [System.Runtime.InteropServices.Marshal]::SecureStringToBSTR($secInput)
-        $plain = [System.Runtime.InteropServices.Marshal]::PtrToStringAuto($bstr)
-        [System.Runtime.InteropServices.Marshal]::ZeroFreeBSTR($bstr)
-        
-        if (-not [string]::IsNullOrWhiteSpace($plain)) {
-            $enc = ConvertFrom-SecureString $secInput
-            Set-Content -Path $tokenFile -Value $enc -Encoding UTF8
-            $resolvedToken = $plain.Trim()
-            Write-Host "  [+] Token encrypted and saved safely to LocalAppData." -ForegroundColor Green
-        }
-    } catch {}
+      $secInput = Read-Host -Prompt "  Paste GitHub Token (hidden, press Enter to skip)" -AsSecureString
+      $bstr = [System.Runtime.InteropServices.Marshal]::SecureStringToBSTR($secInput)
+      $plain = [System.Runtime.InteropServices.Marshal]::PtrToStringAuto($bstr)
+      [System.Runtime.InteropServices.Marshal]::ZeroFreeBSTR($bstr)
+            
+      if (-not [string]::IsNullOrWhiteSpace($plain)) {
+        $enc = ConvertFrom-SecureString $secInput
+        Set-Content -Path $tokenFile -Value $enc -Encoding UTF8
+        $resolvedToken = $plain.Trim()
+        Write-Host "  [+] Token encrypted and saved safely to LocalAppData." -ForegroundColor Green
+      }
+    }
+    catch {}
+  }
 }
+
+# Determine GitHub Username
+$Username = $TargetUsername
+if ([string]::IsNullOrWhiteSpace($Username)) {
+  if ($config.ContainsKey('Username') -and -not [string]::IsNullOrWhiteSpace($config['Username'])) {
+    $Username = $config['Username']
+  }
+  else {
+    # Try to auto-detect from token if available
+    $tokenUser = ""
+    if (-not [string]::IsNullOrWhiteSpace($resolvedToken)) {
+      try {
+        $testAuth = Invoke-RestMethod -Uri "https://api.github.com/user" -Headers @{
+          "User-Agent"    = "GitMyRate-Analytics/1.0"
+          "Accept"        = "application/vnd.github.v3+json"
+          "Authorization" = "Bearer $resolvedToken"
+        } -Method Get -TimeoutSec 4
+        if ($testAuth -and -not [string]::IsNullOrWhiteSpace($testAuth.login)) {
+          $tokenUser = $testAuth.login
+        }
+      }
+      catch {}
+    }
+
+    if (-not [string]::IsNullOrWhiteSpace($tokenUser)) {
+      $Username = $tokenUser
+      Write-Host "  [+] Detected GitHub username from token: '$Username'" -ForegroundColor Green
+    }
+    else {
+      $detectedUser = ""
+      try {
+        $detectedUser = (git config --get github.user) 2>$null
+        if ([string]::IsNullOrWhiteSpace($detectedUser)) {
+          $detectedUser = (git config --get user.name) 2>$null
+        }
+      }
+      catch {}
+
+      if (-not [string]::IsNullOrWhiteSpace($detectedUser)) {
+        Write-Host -NoNewline "  ? Enter GitHub Username [default: $detectedUser]: " -ForegroundColor Yellow
+        $inputUser = [Console]::ReadLine()
+        $Username = if ([string]::IsNullOrWhiteSpace($inputUser)) { $detectedUser } else { $inputUser.Trim() }
+      }
+      else {
+        while ([string]::IsNullOrWhiteSpace($Username)) {
+          Write-Host -NoNewline "  ? Enter GitHub Username: " -ForegroundColor Yellow
+          $Username = [Console]::ReadLine()
+          if ($null -ne $Username) { $Username = $Username.Trim() }
+        }
+      }
+    }
+  }
+}
+
+# Save resolved username
+$config['Username'] = $Username
+$config | ConvertTo-Json | Set-Content -Path $configFile -Encoding UTF8
 
 # Setup GitHub headers and validate
 $headers = @{
-    "User-Agent" = "GitMyRate-Analytics/1.0"
-    "Accept"     = "application/vnd.github.v3+json"
+  "User-Agent" = "GitMyRate-Analytics/1.0"
+  "Accept"     = "application/vnd.github.v3+json"
 }
 $isAuthenticated = $false
 if (-not [string]::IsNullOrWhiteSpace($resolvedToken)) {
-    $headers["Authorization"] = "Bearer $resolvedToken"
-    try {
-        $rateCheck = Invoke-RestMethod -Uri "https://api.github.com/rate_limit" -Headers $headers -Method Get -TimeoutSec 6
-        if ($rateCheck.rate.limit -gt 60) {
-            $isAuthenticated = $true
-            Write-Host "  [+] Authenticated mode (GitHub Token active - $($rateCheck.rate.remaining)/$($rateCheck.rate.limit) req remaining)" -ForegroundColor Green
-        } else {
-            Write-Host "  [i] Token recognized but rate limit is standard public limit." -ForegroundColor Yellow
-            $isAuthenticated = $true
-        }
-    } catch {
-        Write-Host "  [!] Token provided failed GitHub authentication: $($_.Exception.Message)" -ForegroundColor Red
-        Write-Host "      Tip: Run with -ResetToken or -Token 'ghp_...' to set a fresh token." -ForegroundColor Yellow
-        $headers.Remove("Authorization")
-        $isAuthenticated = $false
+  $headers["Authorization"] = "Bearer $resolvedToken"
+  try {
+    $rateCheck = Invoke-RestMethod -Uri "https://api.github.com/rate_limit" -Headers $headers -Method Get -TimeoutSec 6
+    if ($rateCheck.rate.limit -gt 60) {
+      $isAuthenticated = $true
+      Write-Host "  [+] Authenticated mode (GitHub Token active - $($rateCheck.rate.remaining)/$($rateCheck.rate.limit) req remaining)" -ForegroundColor Green
     }
-} else {
-    Write-Host "  [i] Running in public mode (Rate Limit: 60 req/hr)" -ForegroundColor DarkGray
+    else {
+      Write-Host "  [i] Token recognized but rate limit is standard public limit." -ForegroundColor Yellow
+      $isAuthenticated = $true
+    }
+  }
+  catch {
+    Write-Host "  [!] Token provided failed GitHub authentication: $($_.Exception.Message)" -ForegroundColor Red
+    Write-Host "      Tip: Run with -ResetToken or -Token 'ghp_...' to set a fresh token." -ForegroundColor Yellow
+    $headers.Remove("Authorization")
+    $isAuthenticated = $false
+  }
+}
+else {
+  Write-Host "  [i] Running in public mode (Rate Limit: 60 req/hr)" -ForegroundColor DarkGray
 }
 
 # Daily cache check
 $alreadyScannedToday = $false
 if ((Test-Path -Path $reportFile) -and -not $Force) {
-    $lastScanTime = (Get-Item -Path $reportFile).LastWriteTime
-    if ($lastScanTime.Date -eq (Get-Date).Date) {
-        $alreadyScannedToday = $true
-    }
+  $lastScanTime = (Get-Item -Path $reportFile).LastWriteTime
+  if ($lastScanTime.Date -eq (Get-Date).Date) {
+    $alreadyScannedToday = $true
+  }
 }
 
 if ($alreadyScannedToday -and -not $Force) {
-    Write-Host "  [i] Already scanned GitHub today at $($lastScanTime.ToString('h:mm tt'))." -ForegroundColor Yellow
-    Write-Host "      GitHub traffic stats (views/clones) only batch once every 24h at 00:00 UTC." -ForegroundColor DarkGray
-    Write-Host ""
-    Write-Host "  [Enter]  Open cached dashboard instantly" -ForegroundColor Cyan
-    Write-Host "  [R]      Force re-scan GitHub now" -ForegroundColor Gray
-    Write-Host ""
+  Write-Host "  [i] Already scanned GitHub today at $($lastScanTime.ToString('h:mm tt'))." -ForegroundColor Yellow
+  Write-Host "      GitHub traffic stats (views/clones) only batch once every 24h at 00:00 UTC." -ForegroundColor DarkGray
+  Write-Host ""
+  Write-Host "  [Enter]  Open cached dashboard instantly" -ForegroundColor Cyan
+  Write-Host "  [R]      Force re-scan GitHub now" -ForegroundColor Gray
+  Write-Host ""
 
-    $shouldRescan = $false
+  $shouldRescan = $false
+  $canReadKeys = $false
+  try {
+    if ([Environment]::UserInteractive) {
+      $canReadKeys = [Console]::KeyAvailable -or $true
+    }
+  }
+  catch {
     $canReadKeys = $false
-    try {
-        if ([Environment]::UserInteractive) {
-            $canReadKeys = [Console]::KeyAvailable -or $true
-        }
-    } catch {
-        $canReadKeys = $false
-    }
+  }
 
-    if ($canReadKeys) {
-        Write-Host -NoNewline "  Auto-opening cached dashboard in " -ForegroundColor DarkGray
-        for ($sec = 4; $sec -gt 0; $sec--) {
-            Write-Host -NoNewline "$sec... " -ForegroundColor DarkGray
-            for ($sub = 0; $sub -lt 10; $sub++) {
-                if ([Console]::KeyAvailable) {
-                    $key = [Console]::ReadKey($true)
-                    if ($key.Key -eq [ConsoleKey]::R -or $key.Key -eq [ConsoleKey]::Y) {
-                        $shouldRescan = $true
-                        break
-                    }
-                    if ($key.Key -eq [ConsoleKey]::Enter -or $key.Key -eq [ConsoleKey]::Spacebar) {
-                        $shouldRescan = $false
-                        break
-                    }
-                }
-                Start-Sleep -Milliseconds 100
-            }
-            if ($shouldRescan) { break }
+  if ($canReadKeys) {
+    Write-Host -NoNewline "  Auto-opening cached dashboard in " -ForegroundColor DarkGray
+    for ($sec = 4; $sec -gt 0; $sec--) {
+      Write-Host -NoNewline "$sec... " -ForegroundColor DarkGray
+      for ($sub = 0; $sub -lt 10; $sub++) {
+        if ([Console]::KeyAvailable) {
+          $key = [Console]::ReadKey($true)
+          if ($key.Key -eq [ConsoleKey]::R -or $key.Key -eq [ConsoleKey]::Y) {
+            $shouldRescan = $true
+            break
+          }
+          if ($key.Key -eq [ConsoleKey]::Enter -or $key.Key -eq [ConsoleKey]::Spacebar) {
+            $shouldRescan = $false
+            break
+          }
         }
-        Write-Host ""
-    } else {
-        $shouldRescan = $false
+        Start-Sleep -Milliseconds 100
+      }
+      if ($shouldRescan) { break }
     }
+    Write-Host ""
+  }
+  else {
+    $shouldRescan = $false
+  }
 
-    if (-not $shouldRescan) {
-        Write-Host "  [+] Opening cached dashboard in browser..." -ForegroundColor Green
-        if (-not $NoBrowser) {
-            Start-Process -FilePath $reportFile
-        }
-        return
+  if (-not $shouldRescan) {
+    Write-Host "  [+] Opening cached dashboard in browser..." -ForegroundColor Green
+    if (-not $NoBrowser) {
+      Start-Process -FilePath $reportFile
     }
+    return
+  }
 }
 
 Write-Host "  [1/4] Fetching profile for '$Username'..." -ForegroundColor Cyan
 try {
-    $user = Invoke-RestMethod -Uri "https://api.github.com/users/$Username" -Headers $headers -Method Get
-} catch {
-    Write-Host "  [X] Failed to fetch GitHub user '$Username': $($_.Exception.Message)" -ForegroundColor Red
-    return
+  $user = Invoke-RestMethod -Uri "https://api.github.com/users/$Username" -Headers $headers -Method Get
+}
+catch {
+  Write-Host "  [X] Failed to fetch GitHub user '$Username': $($_.Exception.Message)" -ForegroundColor Red
+  return
 }
 
 # Fetch Repositories
@@ -283,55 +338,58 @@ Write-Host "  [2/4] Fetching public repositories..." -ForegroundColor Cyan
 $repos = [System.Collections.Generic.List[PSObject]]::new()
 $page = 1
 while ($true) {
-    $url = "https://api.github.com/users/$Username/repos?per_page=100&page=$page&sort=updated"
-    try {
-        $batch = Invoke-RestMethod -Uri $url -Headers $headers -Method Get
-        if ($null -eq $batch -or $batch.Count -eq 0) { break }
-        foreach ($item in $batch) { $repos.Add($item) }
-        if ($batch.Count -lt 100) { break }
-        $page++
-    } catch {
-        Write-Host "  [!] Error fetching repos page ${page}: $($_.Exception.Message)" -ForegroundColor Yellow
-        break
-    }
+  $url = "https://api.github.com/users/$Username/repos?per_page=100&page=$page&sort=updated"
+  try {
+    $batch = Invoke-RestMethod -Uri $url -Headers $headers -Method Get
+    if ($null -eq $batch -or $batch.Count -eq 0) { break }
+    foreach ($item in $batch) { $repos.Add($item) }
+    if ($batch.Count -lt 100) { break }
+    $page++
+  }
+  catch {
+    Write-Host "  [!] Error fetching repos page ${page}: $($_.Exception.Message)" -ForegroundColor Yellow
+    break
+  }
 }
 
 # License detection helper
 function Get-DetailedLicense {
-    param([string]$owner, [string]$repoName, [string]$spdx)
-    $candidates = @("LICENSE", "LICENSE.md", "license", "license.txt")
-    foreach ($c in $candidates) {
-        try {
-            $raw = Invoke-RestMethod -Uri "https://raw.githubusercontent.com/$owner/$repoName/main/$c" -Headers $headers -Method Get
-            if ($raw -match "PolyForm Noncommercial") { return "PolyForm Noncommercial" }
-            if ($raw -match "PolyForm Perimeter") { return "PolyForm Perimeter" }
-            if ($raw -match "PolyForm Strict") { return "PolyForm Strict" }
-            if ($raw -match "PolyForm Small Business") { return "PolyForm Small Business" }
-            if ($raw -match "PolyForm") { return "PolyForm" }
-            if ($raw -match "CC BY-NC 4.0" -or $raw -match "Attribution-NonCommercial 4.0") { return "CC BY-NC 4.0" }
-            if ($raw -match "Creative Commons") { return "Creative Commons" }
-            if ($raw -match "MIT License") { return "MIT" }
-        } catch {}
+  param([string]$owner, [string]$repoName, [string]$spdx)
+  $candidates = @("LICENSE", "LICENSE.md", "license", "license.txt")
+  foreach ($c in $candidates) {
+    try {
+      $raw = Invoke-RestMethod -Uri "https://raw.githubusercontent.com/$owner/$repoName/main/$c" -Headers $headers -Method Get
+      if ($raw -match "PolyForm Noncommercial") { return "PolyForm Noncommercial" }
+      if ($raw -match "PolyForm Perimeter") { return "PolyForm Perimeter" }
+      if ($raw -match "PolyForm Strict") { return "PolyForm Strict" }
+      if ($raw -match "PolyForm Small Business") { return "PolyForm Small Business" }
+      if ($raw -match "PolyForm") { return "PolyForm" }
+      if ($raw -match "CC BY-NC 4.0" -or $raw -match "Attribution-NonCommercial 4.0") { return "CC BY-NC 4.0" }
+      if ($raw -match "Creative Commons") { return "Creative Commons" }
+      if ($raw -match "MIT License") { return "MIT" }
     }
-    if ($spdx -and $spdx -ne "NOASSERTION") { return $spdx } else { return "Custom" }
+    catch {}
+  }
+  if ($spdx -and $spdx -ne "NOASSERTION") { return $spdx } else { return "Custom" }
 }
 
 # Load existing permanent yearly archive
 $archive = @{}
 if (Test-Path -Path $yearlyFile) {
-    try {
-        $loaded = Get-Content -Path $yearlyFile -Raw | ConvertFrom-Json
-        foreach ($prop in $loaded.psobject.Properties) {
-            $archive[$prop.Name] = $prop.Value
-        }
-    } catch {}
+  try {
+    $loaded = Get-Content -Path $yearlyFile -Raw | ConvertFrom-Json
+    foreach ($prop in $loaded.psobject.Properties) {
+      $archive[$prop.Name] = $prop.Value
+    }
+  }
+  catch {}
 }
 
 # Initialize 14-day rolling timeline
 $today = (Get-Date).Date
 $timelineDays = [System.Collections.Generic.List[string]]::new()
 for ($i = 13; $i -ge 0; $i--) {
-    $timelineDays.Add($today.AddDays(-$i).ToString("yyyy-MM-dd"))
+  $timelineDays.Add($today.AddDays(-$i).ToString("yyyy-MM-dd"))
 }
 
 # Analyze Repositories
@@ -350,156 +408,163 @@ $total14DayUniqueClones = 0
 $trafficPermissionBlocked = $false
 
 foreach ($repo in $repos) {
-    $repoName = $repo.name
-    $stars = [int]$repo.stargazers_count
-    $forks = [int]$repo.forks_count
-    $issues = [int]$repo.open_issues_count
-    $isFork = [bool]$repo.fork
+  $repoName = $repo.name
+  $stars = [int]$repo.stargazers_count
+  $forks = [int]$repo.forks_count
+  $issues = [int]$repo.open_issues_count
+  $isFork = [bool]$repo.fork
 
-    $totalStars += $stars
-    $totalForks += $forks
+  $totalStars += $stars
+  $totalForks += $forks
 
-    # Release Downloads
-    $repoDownloads = 0
-    $releaseCount = 0
-    $latestReleaseTag = ""
+  # Release Downloads
+  $repoDownloads = 0
+  $releaseCount = 0
+  $latestReleaseTag = ""
+  try {
+    $releasesUrl = "https://api.github.com/repos/$Username/$repoName/releases?per_page=50"
+    $releases = Invoke-RestMethod -Uri $releasesUrl -Headers $headers -Method Get
+    if ($releases -and $releases.Count -gt 0) {
+      $releaseCount = $releases.Count
+      $latestReleaseTag = $releases[0].tag_name
+      foreach ($rel in $releases) {
+        $relDownloads = 0
+        $assetList = [System.Collections.Generic.List[PSObject]]::new()
+        if ($rel.assets) {
+          foreach ($asset in $rel.assets) {
+            $dlCount = [int]$asset.download_count
+            $relDownloads += $dlCount
+            $assetList.Add([PSCustomObject]@{
+                name      = $asset.name
+                downloads = $dlCount
+                size      = [int]$asset.size
+              })
+          }
+        }
+        $repoDownloads += $relDownloads
+        $pubDate = if ($rel.published_at) { ([DateTime]::Parse($rel.published_at)).ToString("yyyy-MM-dd") } else { "" }
+        $allReleases.Add([PSCustomObject]@{
+            repo      = $repo.name
+            tag       = $rel.tag_name
+            name      = if ($rel.name) { $rel.name } else { $rel.tag_name }
+            date      = $pubDate
+            downloads = $relDownloads
+            assets    = $assetList
+          })
+      }
+    }
+  }
+  catch {}
+  $totalDownloads += $repoDownloads
+
+  # Check 14-day private traffic/referrers/clones if authenticated
+  $repo14DayViews = 0
+  $repo14DayUniques = 0
+  $repo14DayClones = 0
+  $repo14DayUniqueClones = 0
+  $repoDailyData = @{}
+  foreach ($day in $timelineDays) {
+    $repoDailyData[$day] = @{ views = 0; uniques = 0 }
+  }
+
+  if ($isAuthenticated -and -not $isFork) {
     try {
-        $releasesUrl = "https://api.github.com/repos/$Username/$repoName/releases?per_page=50"
-        $releases = Invoke-RestMethod -Uri $releasesUrl -Headers $headers -Method Get
-        if ($releases -and $releases.Count -gt 0) {
-            $releaseCount = $releases.Count
-            $latestReleaseTag = $releases[0].tag_name
-            foreach ($rel in $releases) {
-                $relDownloads = 0
-                $assetList = [System.Collections.Generic.List[PSObject]]::new()
-                if ($rel.assets) {
-                    foreach ($asset in $rel.assets) {
-                        $dlCount = [int]$asset.download_count
-                        $relDownloads += $dlCount
-                        $assetList.Add([PSCustomObject]@{
-                            name      = $asset.name
-                            downloads = $dlCount
-                            size      = [int]$asset.size
-                        })
-                    }
-                }
-                $repoDownloads += $relDownloads
-                $pubDate = if ($rel.published_at) { ([DateTime]::Parse($rel.published_at)).ToString("yyyy-MM-dd") } else { "" }
-                $allReleases.Add([PSCustomObject]@{
-                    repo      = $repo.name
-                    tag       = $rel.tag_name
-                    name      = if ($rel.name) { $rel.name } else { $rel.tag_name }
-                    date      = $pubDate
-                    downloads = $relDownloads
-                    assets    = $assetList
-                })
+      $viewsData = Invoke-RestMethod -Uri "https://api.github.com/repos/$Username/$($repo.name)/traffic/views" -Headers $headers -Method Get
+      $repo14DayViews = [int]$viewsData.count
+      $repo14DayUniques = [int]$viewsData.uniques
+      $total14DayViews += $repo14DayViews
+
+      if ($viewsData.views) {
+        foreach ($v in $viewsData.views) {
+          $dayKey = ([DateTime]::Parse($v.timestamp)).ToString("yyyy-MM-dd")
+          $vCount = [int]$v.count
+          $vUniq = [int]$v.uniques
+
+          $repoDailyData[$dayKey] = @{
+            views   = $vCount
+            uniques = $vUniq
+          }
+
+          # Merge into permanent yearly archive
+          if (-not $archive.ContainsKey($dayKey)) {
+            $archive[$dayKey] = [PSCustomObject]@{
+              views   = [PSCustomObject]@{}
+              uniques = [PSCustomObject]@{}
             }
+          }
+          $archive[$dayKey].views | Add-Member -MemberType NoteProperty -Name $repo.name -Value $vCount -Force
+          $archive[$dayKey].uniques | Add-Member -MemberType NoteProperty -Name $repo.name -Value $vUniq -Force
         }
-    } catch {}
-    $totalDownloads += $repoDownloads
+      }
 
-    # Check 14-day private traffic/referrers/clones if authenticated
-    $repo14DayViews = 0
-    $repo14DayUniques = 0
-    $repo14DayClones = 0
-    $repo14DayUniqueClones = 0
-    $repoDailyData = @{}
-    foreach ($day in $timelineDays) {
-        $repoDailyData[$day] = @{ views = 0; uniques = 0 }
-    }
-
-    if ($isAuthenticated -and -not $isFork) {
-        try {
-            $viewsData = Invoke-RestMethod -Uri "https://api.github.com/repos/$Username/$($repo.name)/traffic/views" -Headers $headers -Method Get
-            $repo14DayViews = [int]$viewsData.count
-            $repo14DayUniques = [int]$viewsData.uniques
-            $total14DayViews += $repo14DayViews
-
-            if ($viewsData.views) {
-                foreach ($v in $viewsData.views) {
-                    $dayKey = ([DateTime]::Parse($v.timestamp)).ToString("yyyy-MM-dd")
-                    $vCount = [int]$v.count
-                    $vUniq = [int]$v.uniques
-
-                    $repoDailyData[$dayKey] = @{
-                        views   = $vCount
-                        uniques = $vUniq
-                    }
-
-                    # Merge into permanent yearly archive
-                    if (-not $archive.ContainsKey($dayKey)) {
-                        $archive[$dayKey] = [PSCustomObject]@{
-                            views   = [PSCustomObject]@{}
-                            uniques = [PSCustomObject]@{}
-                        }
-                    }
-                    $archive[$dayKey].views | Add-Member -MemberType NoteProperty -Name $repo.name -Value $vCount -Force
-                    $archive[$dayKey].uniques | Add-Member -MemberType NoteProperty -Name $repo.name -Value $vUniq -Force
-                }
-            }
-
-            $refData = Invoke-RestMethod -Uri "https://api.github.com/repos/$Username/$($repo.name)/traffic/popular/referrers" -Headers $headers -Method Get
-            if ($refData) {
-                foreach ($ref in $refData) {
-                    $trafficReferrers.Add([PSCustomObject]@{
-                        Repo      = $repo.name
-                        Referrer  = $ref.referrer
-                        Count     = $ref.count
-                        Uniques   = $ref.uniques
-                    })
-                }
-            }
-
-            $clonesData = Invoke-RestMethod -Uri "https://api.github.com/repos/$Username/$($repo.name)/traffic/clones" -Headers $headers -Method Get
-            $repo14DayClones = [int]$clonesData.count
-            $repo14DayUniqueClones = [int]$clonesData.uniques
-            $total14DayClones += $repo14DayClones
-            $total14DayUniqueClones += $repo14DayUniqueClones
-        } catch {
-            if ($_.ToString() -match "403" -or $_.ToString() -match "Resource not accessible") {
-                $trafficPermissionBlocked = $true
-            }
+      $refData = Invoke-RestMethod -Uri "https://api.github.com/repos/$Username/$($repo.name)/traffic/popular/referrers" -Headers $headers -Method Get
+      if ($refData) {
+        foreach ($ref in $refData) {
+          $trafficReferrers.Add([PSCustomObject]@{
+              Repo     = $repo.name
+              Referrer = $ref.referrer
+              Count    = $ref.count
+              Uniques  = $ref.uniques
+            })
         }
+      }
+
+      $clonesData = Invoke-RestMethod -Uri "https://api.github.com/repos/$Username/$($repo.name)/traffic/clones" -Headers $headers -Method Get
+      $repo14DayClones = [int]$clonesData.count
+      $repo14DayUniqueClones = [int]$clonesData.uniques
+      $total14DayClones += $repo14DayClones
+      $total14DayUniqueClones += $repo14DayUniqueClones
     }
+    catch {
+      if ($_.ToString() -match "403" -or $_.ToString() -match "Resource not accessible") {
+        $trafficPermissionBlocked = $true
+      }
+    }
+  }
 
-    $dailyTrafficByRepo[$repo.name] = $repoDailyData
+  $dailyTrafficByRepo[$repo.name] = $repoDailyData
 
-    # Format size
-    $sizeKb = [int]$repo.size
-    $formattedSize = if ($sizeKb -gt 1024) { "{0:N1} MB" -f ($sizeKb / 1024) } else { "$sizeKb KB" }
+  # Format size
+  $sizeKb = [int]$repo.size
+  $formattedSize = if ($sizeKb -gt 1024) { "{0:N1} MB" -f ($sizeKb / 1024) } else { "$sizeKb KB" }
 
-    # Detect license
-    $rawSpdx = if ($repo.license -and $repo.license.spdx_id) { $repo.license.spdx_id } else { "" }
-    $detectedLicense = Get-DetailedLicense -owner $Username -repoName $repo.name -spdx $rawSpdx
+  # Detect license
+  $rawSpdx = if ($repo.license -and $repo.license.spdx_id) { $repo.license.spdx_id } else { "" }
+  $detectedLicense = Get-DetailedLicense -owner $Username -repoName $repo.name -spdx $rawSpdx
 
-    # Normalize Language
-    $lang = if ($repo.language) { $repo.language } else { "General" }
-    if ($lang -eq "PowerShell") { $lang = "PoSH" }
+  # Normalize Language
+  $lang = if ($repo.language) { $repo.language } else { "General" }
+  if ($lang -eq "PowerShell") { $lang = "PoSH" }
 
-    $analyzedRepos.Add([PSCustomObject]@{
-        Name               = $repo.name
-        FullName           = $repo.full_name
-        Description        = if ($repo.description) { $repo.description } else { "No description provided." }
-        HtmlUrl            = $repo.html_url
-        Language           = $lang
-        Stars              = $stars
-        Forks              = $forks
-        Watchers           = [int]$repo.watchers_count
-        OpenIssues         = $issues
-        IsFork             = $isFork
-        Downloads          = $repoDownloads
-        ReleaseCount       = $releaseCount
-        LatestReleaseTag   = $latestReleaseTag
-        Topics             = if ($repo.topics) { @($repo.topics) } else { @() }
-        CreatedAt          = $repo.created_at
-        PushedAt           = $repo.pushed_at
-        SizeFormatted      = $formattedSize
-        License            = $detectedLicense
-        Views14Days        = $repo14DayViews
-        Uniques14Days      = $repo14DayUniques
-        Clones14Days       = $repo14DayClones
-        UniqueClones14Days = $repo14DayUniqueClones
+  $analyzedRepos.Add([PSCustomObject]@{
+      Name               = $repo.name
+      FullName           = $repo.full_name
+      Description        = if ($repo.description) { $repo.description } else { "No description provided." }
+      HtmlUrl            = $repo.html_url
+      Language           = $lang
+      Stars              = $stars
+      Forks              = $forks
+      Watchers           = [int]$repo.watchers_count
+      OpenIssues         = $issues
+      IsFork             = $isFork
+      Downloads          = $repoDownloads
+      ReleaseCount       = $releaseCount
+      LatestReleaseTag   = $latestReleaseTag
+      Topics             = if ($repo.topics) { @($repo.topics) } else { @() }
+      CreatedAt          = $repo.created_at
+      PushedAt           = $repo.pushed_at
+      SizeFormatted      = $formattedSize
+      License            = $detectedLicense
+      Views14Days        = $repo14DayViews
+      Uniques14Days      = $repo14DayUniques
+      Clones14Days       = $repo14DayClones
+      UniqueClones14Days = $repo14DayUniqueClones
     })
+}
+
+if ($trafficPermissionBlocked) {
+  Write-Host "  [!] Note: Traffic metrics returned 403 on some repositories." -ForegroundColor DarkYellow
+  Write-Host "      Ensure your token has repository Administration/Metadata read permissions." -ForegroundColor DarkGray
 }
 
 # Save permanent yearly archive to disk
@@ -508,24 +573,24 @@ $archive | ConvertTo-Json -Depth 5 | Set-Content -Path $yearlyFile -Encoding UTF
 # Build Rolling 14-day list
 $chartRolling14List = [System.Collections.Generic.List[PSObject]]::new()
 foreach ($day in $timelineDays) {
-    $sumViews = 0
-    $sumUniques = 0
-    $dObj = [DateTime]::Parse($day)
-    $label = $dObj.ToString("MMM dd")
+  $sumViews = 0
+  $sumUniques = 0
+  $dObj = [DateTime]::Parse($day)
+  $label = $dObj.ToString("MMM dd")
 
-    foreach ($rName in $dailyTrafficByRepo.Keys) {
-        $rDay = $dailyTrafficByRepo[$rName][$day]
-        if ($rDay) {
-            $sumViews += $rDay.views
-            $sumUniques += $rDay.uniques
-        }
+  foreach ($rName in $dailyTrafficByRepo.Keys) {
+    $rDay = $dailyTrafficByRepo[$rName][$day]
+    if ($rDay) {
+      $sumViews += $rDay.views
+      $sumUniques += $rDay.uniques
     }
+  }
 
-    $chartRolling14List.Add([PSCustomObject]@{
-        date    = $day
-        label   = $label
-        views   = $sumViews
-        uniques = $sumUniques
+  $chartRolling14List.Add([PSCustomObject]@{
+      date    = $day
+      label   = $label
+      views   = $sumViews
+      uniques = $sumUniques
     })
 }
 
@@ -533,7 +598,7 @@ foreach ($day in $timelineDays) {
 $allDatesSet = [System.Collections.Generic.HashSet[string]]::new()
 foreach ($k in $archive.Keys) { $allDatesSet.Add($k) | Out-Null }
 foreach ($rel in $allReleases) {
-    if ($rel.date) { $allDatesSet.Add($rel.date) | Out-Null }
+  if ($rel.date) { $allDatesSet.Add($rel.date) | Out-Null }
 }
 $sortedDates = $allDatesSet | Sort-Object
 
@@ -546,140 +611,141 @@ $runningPerRepoViews = @{}
 $runningPerRepoUniques = @{}
 $runningPerRepoDownloads = @{}
 foreach ($repo in $repos) {
-    $runningPerRepoViews[$repo.name] = 0
-    $runningPerRepoUniques[$repo.name] = 0
-    $runningPerRepoDownloads[$repo.name] = 0
+  $runningPerRepoViews[$repo.name] = 0
+  $runningPerRepoUniques[$repo.name] = 0
+  $runningPerRepoDownloads[$repo.name] = 0
 }
 
 $releasesByDate = @{}
 foreach ($rel in $allReleases) {
-    if ($rel.date) {
-        if (-not $releasesByDate.ContainsKey($rel.date)) {
-            $releasesByDate[$rel.date] = [System.Collections.Generic.List[PSObject]]::new()
-        }
-        $releasesByDate[$rel.date].Add($rel)
+  if ($rel.date) {
+    if (-not $releasesByDate.ContainsKey($rel.date)) {
+      $releasesByDate[$rel.date] = [System.Collections.Generic.List[PSObject]]::new()
     }
+    $releasesByDate[$rel.date].Add($rel)
+  }
 }
 
 foreach ($dateKey in $sortedDates) {
-    $dayViewsCombined = 0
-    $dayUniquesCombined = 0
-    $dayDownloadsCombined = 0
+  $dayViewsCombined = 0
+  $dayUniquesCombined = 0
+  $dayDownloadsCombined = 0
 
-    $dayRepoViews = @{}
-    $dayRepoUniques = @{}
-    $dayRepoDownloads = @{}
-    $dayCumRepoViews = @{}
-    $dayCumRepoUniques = @{}
-    $dayCumRepoDownloads = @{}
+  $dayRepoViews = @{}
+  $dayRepoUniques = @{}
+  $dayRepoDownloads = @{}
+  $dayCumRepoViews = @{}
+  $dayCumRepoUniques = @{}
+  $dayCumRepoDownloads = @{}
 
-    foreach ($repo in $repos) {
-        $dayRepoViews[$repo.name] = 0
-        $dayRepoUniques[$repo.name] = 0
-        $dayRepoDownloads[$repo.name] = 0
+  foreach ($repo in $repos) {
+    $dayRepoViews[$repo.name] = 0
+    $dayRepoUniques[$repo.name] = 0
+    $dayRepoDownloads[$repo.name] = 0
+  }
+
+  if ($archive.ContainsKey($dateKey)) {
+    if ($archive[$dateKey].views) {
+      foreach ($prop in $archive[$dateKey].views.psobject.Properties) {
+        $val = [int]$prop.Value
+        $dayViewsCombined += $val
+        $dayRepoViews[$prop.Name] = $val
+        $runningPerRepoViews[$prop.Name] = ([int]$runningPerRepoViews[$prop.Name]) + $val
+      }
     }
-
-    if ($archive.ContainsKey($dateKey)) {
-        if ($archive[$dateKey].views) {
-            foreach ($prop in $archive[$dateKey].views.psobject.Properties) {
-                $val = [int]$prop.Value
-                $dayViewsCombined += $val
-                $dayRepoViews[$prop.Name] = $val
-                $runningPerRepoViews[$prop.Name] = ([int]$runningPerRepoViews[$prop.Name]) + $val
-            }
-        }
-        if ($archive[$dateKey].uniques) {
-            foreach ($prop in $archive[$dateKey].uniques.psobject.Properties) {
-                $val = [int]$prop.Value
-                $dayUniquesCombined += $val
-                $dayRepoUniques[$prop.Name] = $val
-                $runningPerRepoUniques[$prop.Name] = ([int]$runningPerRepoUniques[$prop.Name]) + $val
-            }
-        }
+    if ($archive[$dateKey].uniques) {
+      foreach ($prop in $archive[$dateKey].uniques.psobject.Properties) {
+        $val = [int]$prop.Value
+        $dayUniquesCombined += $val
+        $dayRepoUniques[$prop.Name] = $val
+        $runningPerRepoUniques[$prop.Name] = ([int]$runningPerRepoUniques[$prop.Name]) + $val
+      }
     }
+  }
 
-    if ($releasesByDate.ContainsKey($dateKey)) {
-        foreach ($rel in $releasesByDate[$dateKey]) {
-            $dl = [int]$rel.downloads
-            $dayDownloadsCombined += $dl
-            $dayRepoDownloads[$rel.repo] = ([int]$dayRepoDownloads[$rel.repo]) + $dl
-            $runningPerRepoDownloads[$rel.repo] = ([int]$runningPerRepoDownloads[$rel.repo]) + $dl
-        }
+  if ($releasesByDate.ContainsKey($dateKey)) {
+    foreach ($rel in $releasesByDate[$dateKey]) {
+      $dl = [int]$rel.downloads
+      $dayDownloadsCombined += $dl
+      $dayRepoDownloads[$rel.repo] = ([int]$dayRepoDownloads[$rel.repo]) + $dl
+      $runningPerRepoDownloads[$rel.repo] = ([int]$runningPerRepoDownloads[$rel.repo]) + $dl
     }
+  }
 
-    foreach ($repo in $repos) {
-        $dayCumRepoViews[$repo.name] = [int]$runningPerRepoViews[$repo.name]
-        $dayCumRepoUniques[$repo.name] = [int]$runningPerRepoUniques[$repo.name]
-        $dayCumRepoDownloads[$repo.name] = [int]$runningPerRepoDownloads[$repo.name]
-    }
+  foreach ($repo in $repos) {
+    $dayCumRepoViews[$repo.name] = [int]$runningPerRepoViews[$repo.name]
+    $dayCumRepoUniques[$repo.name] = [int]$runningPerRepoUniques[$repo.name]
+    $dayCumRepoDownloads[$repo.name] = [int]$runningPerRepoDownloads[$repo.name]
+  }
 
-    $runningCombinedViews += $dayViewsCombined
-    $runningCombinedUniques += $dayUniquesCombined
-    $runningCombinedDownloads += $dayDownloadsCombined
+  $runningCombinedViews += $dayViewsCombined
+  $runningCombinedUniques += $dayUniquesCombined
+  $runningCombinedDownloads += $dayDownloadsCombined
 
-    $chartCumulativeList.Add([PSCustomObject]@{
-        date                 = $dateKey
-        label                = ([DateTime]::Parse($dateKey)).ToString("MMM dd")
-        month                = ([DateTime]::Parse($dateKey)).ToString("MMM yyyy")
-        dayViews             = $dayViewsCombined
-        dayUniques           = $dayUniquesCombined
-        dayDownloads         = $dayDownloadsCombined
-        cumViews             = $runningCombinedViews
-        cumUniques           = $runningCombinedUniques
-        cumDownloads         = $runningCombinedDownloads
-        byRepoDayViews       = $dayRepoViews
-        byRepoDayUniques     = $dayRepoUniques
-        byRepoDayDownloads   = $dayRepoDownloads
-        byRepoCumViews       = $dayCumRepoViews
-        byRepoCumUniques     = $dayCumRepoUniques
-        byRepoCumDownloads   = $dayCumRepoDownloads
+  $chartCumulativeList.Add([PSCustomObject]@{
+      date               = $dateKey
+      label              = ([DateTime]::Parse($dateKey)).ToString("MMM dd")
+      month              = ([DateTime]::Parse($dateKey)).ToString("MMM yyyy")
+      dayViews           = $dayViewsCombined
+      dayUniques         = $dayUniquesCombined
+      dayDownloads       = $dayDownloadsCombined
+      cumViews           = $runningCombinedViews
+      cumUniques         = $runningCombinedUniques
+      cumDownloads       = $runningCombinedDownloads
+      byRepoDayViews     = $dayRepoViews
+      byRepoDayUniques   = $dayRepoUniques
+      byRepoDayDownloads = $dayRepoDownloads
+      byRepoCumViews     = $dayCumRepoViews
+      byRepoCumUniques   = $dayCumRepoUniques
+      byRepoCumDownloads = $dayCumRepoDownloads
     })
 }
 
 # ----------------- JSON History Tracking -----------------
 $history = @()
 if (Test-Path -Path $historyFile) {
-    try {
-        $jsonRaw = Get-Content -Path $historyFile -Raw
-        if ($jsonRaw -and $jsonRaw.Trim()) {
-            $parsed = $jsonRaw | ConvertFrom-Json
-            if ($parsed -is [System.Array]) { $history = $parsed } else { $history = @($parsed) }
-        }
-    } catch {
-        $history = @()
+  try {
+    $jsonRaw = Get-Content -Path $historyFile -Raw
+    if ($jsonRaw -and $jsonRaw.Trim()) {
+      $parsed = $jsonRaw | ConvertFrom-Json
+      if ($parsed -is [System.Array]) { $history = $parsed } else { $history = @($parsed) }
     }
+  }
+  catch {
+    $history = @()
+  }
 }
 
 # Fallback: if live traffic returned 0 because of unauthenticated mode, recover previous known metrics
 if ($total14DayViews -eq 0 -and $history.Count -gt 0) {
-    $lastSnap = $history[-1]
-    if ($lastSnap.totalViews14d -gt 0) {
-        $total14DayViews = [int]$lastSnap.totalViews14d
-        $total14DayClones = [int]$lastSnap.totalClones14d
-        $total14DayUniqueClones = [int]$lastSnap.totalUniqueClones14d
-    }
+  $lastSnap = $history[-1]
+  if ($lastSnap.totalViews14d -gt 0) {
+    $total14DayViews = [int]$lastSnap.totalViews14d
+    $total14DayClones = [int]$lastSnap.totalClones14d
+    $total14DayUniqueClones = [int]$lastSnap.totalUniqueClones14d
+  }
 }
 
 $deltaStars = 0
 $deltaDownloads = 0
 if ($history.Count -gt 0) {
-    $lastSnap = $history[-1]
-    $deltaStars = [Math]::Max(0, $totalStars - [int]$lastSnap.totalStars)
-    $deltaDownloads = [Math]::Max(0, $totalDownloads - [int]$lastSnap.totalDownloads)
+  $lastSnap = $history[-1]
+  $deltaStars = [Math]::Max(0, $totalStars - [int]$lastSnap.totalStars)
+  $deltaDownloads = [Math]::Max(0, $totalDownloads - [int]$lastSnap.totalDownloads)
 }
 
 $currentSnapshot = [PSCustomObject]@{
-    timestamp           = (Get-Date).ToString("o")
-    dateDisplay         = (Get-Date).ToString("yyyy-MM-dd HH:mm")
-    totalStars          = $totalStars
-    totalDownloads      = $totalDownloads
-    totalForks          = $totalForks
-    totalRepos          = $analyzedRepos.Count
-    totalViews14d       = $total14DayViews
-    totalClones14d      = $total14DayClones
-    totalUniqueClones14d = $total14DayUniqueClones
-    yearCumulativeViews = $runningCombinedViews
-    repos               = ($analyzedRepos | Select-Object Name, Stars, Downloads, Forks, Views14Days, License, Language)
+  timestamp            = (Get-Date).ToString("o")
+  dateDisplay          = (Get-Date).ToString("yyyy-MM-dd HH:mm")
+  totalStars           = $totalStars
+  totalDownloads       = $totalDownloads
+  totalForks           = $totalForks
+  totalRepos           = $analyzedRepos.Count
+  totalViews14d        = $total14DayViews
+  totalClones14d       = $total14DayClones
+  totalUniqueClones14d = $total14DayUniqueClones
+  yearCumulativeViews  = $runningCombinedViews
+  repos                = ($analyzedRepos | Select-Object Name, Stars, Downloads, Forks, Views14Days, License, Language)
 }
 
 $historyList = [System.Collections.Generic.List[PSObject]]::new()
@@ -688,19 +754,21 @@ foreach ($item in $history) { $historyList.Add($item) }
 $todayDateStr = (Get-Date).ToString("yyyy-MM-dd")
 $lastSnapDateStr = ""
 if ($history.Count -gt 0 -and $history[-1].timestamp) {
-    try {
-        $lastSnapDateStr = ([DateTime]::Parse($history[-1].timestamp)).ToString("yyyy-MM-dd")
-    } catch {}
+  try {
+    $lastSnapDateStr = ([DateTime]::Parse($history[-1].timestamp)).ToString("yyyy-MM-dd")
+  }
+  catch {}
 }
 
 if ($lastSnapDateStr -eq $todayDateStr -and $historyList.Count -gt 0) {
-    $historyList[$historyList.Count - 1] = $currentSnapshot
-} else {
-    $historyList.Add($currentSnapshot)
+  $historyList[$historyList.Count - 1] = $currentSnapshot
+}
+else {
+  $historyList.Add($currentSnapshot)
 }
 
 if ($historyList.Count -gt 300) {
-    $historyList = [System.Collections.Generic.List[PSObject]]::new($historyList[($historyList.Count - 300)..($historyList.Count - 1)])
+  $historyList = [System.Collections.Generic.List[PSObject]]::new($historyList[($historyList.Count - 300)..($historyList.Count - 1)])
 }
 
 $historyJson = if ($historyList.Count -eq 1) { "[ " + ($historyList[0] | ConvertTo-Json -Depth 5) + " ]" } else { $historyList | ConvertTo-Json -Depth 5 }
@@ -713,33 +781,34 @@ $avatarDataUri = $avatarUrl
 $hasCustomIcon = $false
 
 try {
-    $wc = New-Object System.Net.WebClient
-    $wc.Headers.Add("User-Agent", "GitMyRate-Setup")
-    $avatarBytes = $wc.DownloadData($avatarUrl)
-    $wc.Dispose()
+  $wc = New-Object System.Net.WebClient
+  $wc.Headers.Add("User-Agent", "GitMyRate-Setup")
+  $avatarBytes = $wc.DownloadData($avatarUrl)
+  $wc.Dispose()
 
-    $b64 = [Convert]::ToBase64String($avatarBytes)
-    $avatarDataUri = "data:image/png;base64,$b64"
+  $b64 = [Convert]::ToBase64String($avatarBytes)
+  $avatarDataUri = "data:image/png;base64,$b64"
 
-    Add-Type -AssemblyName System.Drawing -ErrorAction SilentlyContinue
-    if ([System.Type]::GetType("System.Drawing.Bitmap")) {
-        $ms = [System.IO.MemoryStream]::new($avatarBytes)
-        $bmp = [System.Drawing.Bitmap]::FromStream($ms)
-        $thumb = [System.Drawing.Bitmap]::new($bmp, [System.Drawing.Size]::new(64, 64))
-        $hIcon = $thumb.GetHicon()
-        $ico = [System.Drawing.Icon]::FromHandle($hIcon)
-        $fs = [System.IO.FileStream]::new($avatarIco, [System.IO.FileMode]::Create)
-        $ico.Save($fs)
-        $fs.Close()
-        $fs.Dispose()
-        $ico.Dispose()
-        $thumb.Dispose()
-        $bmp.Dispose()
-        $ms.Dispose()
-        $hasCustomIcon = $true
-    }
-} catch {
-    $hasCustomIcon = $false
+  Add-Type -AssemblyName System.Drawing -ErrorAction SilentlyContinue
+  if ([System.Type]::GetType("System.Drawing.Bitmap")) {
+    $ms = [System.IO.MemoryStream]::new($avatarBytes)
+    $bmp = [System.Drawing.Bitmap]::FromStream($ms)
+    $thumb = [System.Drawing.Bitmap]::new($bmp, [System.Drawing.Size]::new(64, 64))
+    $hIcon = $thumb.GetHicon()
+    $ico = [System.Drawing.Icon]::FromHandle($hIcon)
+    $fs = [System.IO.FileStream]::new($avatarIco, [System.IO.FileMode]::Create)
+    $ico.Save($fs)
+    $fs.Close()
+    $fs.Dispose()
+    $ico.Dispose()
+    $thumb.Dispose()
+    $bmp.Dispose()
+    $ms.Dispose()
+    $hasCustomIcon = $true
+  }
+}
+catch {
+  $hasCustomIcon = $false
 }
 
 # Create / Update Desktop Shortcut & Offline Launcher
@@ -762,21 +831,23 @@ if (Test-Path `$report) {
 Set-Content -Path $launcherPs1 -Value $launcherContent -Encoding UTF8
 
 if ($CreateShortcut -or (-not (Test-Path $shortcutFile))) {
-    try {
-        $wsh = New-Object -ComObject WScript.Shell
-        $sc = $wsh.CreateShortcut($shortcutFile)
-        $sc.TargetPath = "powershell.exe"
-        $sc.Arguments = "-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File `"$launcherPs1`""
-        $sc.Description = "GitMyRate - GitHub Audience & Conversion Rates Dashboard"
-        $sc.WorkingDirectory = $appDataDir
-        if ($hasCustomIcon -and (Test-Path $avatarIco)) {
-            $sc.IconLocation = "$avatarIco,0"
-        } else {
-            $sc.IconLocation = "$env:SystemRoot\System32\shell32.dll,22"
-        }
-        $sc.Save()
-        Write-Host "  [+] Desktop Shortcut created: 'GitMyRate ($Username).lnk'" -ForegroundColor Green
-    } catch {}
+  try {
+    $wsh = New-Object -ComObject WScript.Shell
+    $sc = $wsh.CreateShortcut($shortcutFile)
+    $sc.TargetPath = "powershell.exe"
+    $sc.Arguments = "-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File `"$launcherPs1`""
+    $sc.Description = "GitMyRate - GitHub Audience & Conversion Rates Dashboard"
+    $sc.WorkingDirectory = $appDataDir
+    if ($hasCustomIcon -and (Test-Path $avatarIco)) {
+      $sc.IconLocation = "$avatarIco,0"
+    }
+    else {
+      $sc.IconLocation = "$env:SystemRoot\System32\shell32.dll,22"
+    }
+    $sc.Save()
+    Write-Host "  [+] Desktop Shortcut created: 'GitMyRate ($Username).lnk'" -ForegroundColor Green
+  }
+  catch {}
 }
 
 Write-Host "  [4/4] Rendering GitMyRate HTML Dashboard..." -ForegroundColor Cyan
@@ -790,22 +861,23 @@ $radarTermsDisplay = ($searchTerms | ForEach-Object { "<code>$_</code>" }) -join
 # Prepare Referrers / Traffic Block
 $trafficHtml = ""
 if ($isAuthenticated) {
-    $refRows = ""
-    if ($trafficReferrers.Count -gt 0) {
-        foreach ($tr in $trafficReferrers) {
-            $refRows += "<tr><td><strong>$($tr.Repo)</strong></td><td>$($tr.Referrer)</td><td>$($tr.Count)</td><td>$($tr.Uniques)</td></tr>"
-        }
-    } else {
-        $refRows = "<tr><td colspan='4' style='color:var(--text-muted); text-align:center;'>No external referral domains detected in the last 14 days.</td></tr>"
+  $refRows = ""
+  if ($trafficReferrers.Count -gt 0) {
+    foreach ($tr in $trafficReferrers) {
+      $refRows += "<tr><td><strong>$($tr.Repo)</strong></td><td>$($tr.Referrer)</td><td>$($tr.Count)</td><td>$($tr.Uniques)</td></tr>"
     }
+  }
+  else {
+    $refRows = "<tr><td colspan='4' style='color:var(--text-muted); text-align:center;'>No external referral domains detected in the last 14 days.</td></tr>"
+  }
 
-    $cloneRows = ""
-    $reposWithClones = $analyzedRepos | Where-Object { -not $_.IsFork } | Sort-Object -Descending Clones14Days
-    foreach ($r in $reposWithClones) {
-        $cloneRows += "<tr><td><strong>$($r.Name)</strong></td><td style='color:#34d399; font-weight:700;'>$($r.Clones14Days)</td><td style='color:var(--text-muted);'>$($r.Views14Days) views</td></tr>"
-    }
+  $cloneRows = ""
+  $reposWithClones = $analyzedRepos | Where-Object { -not $_.IsFork } | Sort-Object -Descending Clones14Days
+  foreach ($r in $reposWithClones) {
+    $cloneRows += "<tr><td><strong>$($r.Name)</strong></td><td style='color:#34d399; font-weight:700;'>$($r.Clones14Days)</td><td style='color:var(--text-muted);'>$($r.Views14Days) views</td></tr>"
+  }
 
-    $trafficHtml = @"
+  $trafficHtml = @"
     <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 1.25rem; margin-top: 1.5rem;">
       <div class="traffic-box" style="margin-top: 0;">
         <div class="traffic-title">&#x1F4C8; Inbound Referrers (Past 14 Days)</div>
@@ -828,8 +900,9 @@ if ($isAuthenticated) {
       </div>
     </div>
 "@
-} else {
-    $trafficHtml = @"
+}
+else {
+  $trafficHtml = @"
     <div class="traffic-box" style="display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 0.75rem; margin-top: 1.5rem;">
       <div style="font-size: 0.84rem; color: var(--text-muted); line-height: 1.4;">
         <strong style="color: #f1f5f9;">Unlock Private Referrers, Clones &amp; Visitor Retention:</strong><br>
@@ -1960,13 +2033,8 @@ $htmlTemplate = @'
         const topics = Array.isArray(r.Topics) ? r.Topics : [];
         const topicsHtml = topics.slice(0, 6).map(t => `<span class="topic-tag">#${t}</span>`).join('');
         const extraTopics = topics.length > 6 ? `<span class="topic-tag">+${topics.length - 6}</span>` : '';
-        const badge = r.IsFork 
-          ? `<span class="badge-fork">&#x1F500; Fork</span>` 
-          : `<span class="badge-source">&#x2728; Original</span>`;
-
-        const releaseBadge = r.LatestReleaseTag 
-          ? `<span class="badge-release" title="Latest release: ${r.LatestReleaseTag}">&#x1F4E6; ${r.LatestReleaseTag}</span>` 
-          : '';
+        const badge = r.IsFork ? '<span class="badge-fork">&#x1F500; Fork</span>' : '<span class="badge-source">&#x2728; Original</span>';
+        const releaseBadge = r.LatestReleaseTag ? `<span class="badge-release" title="Latest release: ${r.LatestReleaseTag}">&#x1F4E6; ${r.LatestReleaseTag}</span>` : '';
 
         const licenseBadge = r.License ? `<span class="badge-license" title="License: ${r.License}">${r.License}</span>` : '';
 
@@ -2086,27 +2154,27 @@ $htmlTemplate = @'
 
 # Replace tokens in template
 $htmlContent = $htmlTemplate `
-    -replace '__USER_AVATAR__', $avatarDataUri `
-    -replace '__USER_LOGIN__', $user.login `
-    -replace '__USER_BIO__', [System.Web.HttpUtility]::HtmlEncode($bio) `
-    -replace '__TOTAL_STARS__', $totalStars `
-    -replace '__DELTA_STARS_HTML__', $deltaStarsHtml `
-    -replace '__TOTAL_DOWNLOADS__', $totalDownloads `
-    -replace '__DELTA_DOWNLOADS_HTML__', $deltaDownloadsHtml `
-    -replace '__TOTAL_VIEWS_14D__', $total14DayViews `
-    -replace '__TOTAL_FORKS__', $totalForks `
-    -replace '__TOTAL_REPOS__', $analyzedRepos.Count `
-    -replace '__TRAFFIC_HTML__', $trafficHtml `
-    -replace '__RADAR_QUERY_QUOTED__', $radarQueryQuoted `
-    -replace '__RADAR_QUERY_PLAIN__', $radarQueryPlain `
-    -replace '__RADAR_TERMS_DISPLAY__', $radarTermsDisplay `
-    -replace '__GENERATED_AT__', $generatedAt `
-    -replace '__REPOS_JSON__', $reposJson `
-    -replace '__ROLLING_14_JSON__', $rolling14Json `
-    -replace '__CUMULATIVE_YEAR_JSON__', $cumulativeYearJson `
-    -replace '__BY_REPO_DAILY_JSON__', $byRepoDailyJson `
-    -replace '__RELEASES_JSON__', $allReleasesJson `
-    -replace '__HISTORY_JSON__', $historyCompressed
+  -replace '__USER_AVATAR__', $avatarDataUri `
+  -replace '__USER_LOGIN__', $user.login `
+  -replace '__USER_BIO__', [System.Web.HttpUtility]::HtmlEncode($bio) `
+  -replace '__TOTAL_STARS__', $totalStars `
+  -replace '__DELTA_STARS_HTML__', $deltaStarsHtml `
+  -replace '__TOTAL_DOWNLOADS__', $totalDownloads `
+  -replace '__DELTA_DOWNLOADS_HTML__', $deltaDownloadsHtml `
+  -replace '__TOTAL_VIEWS_14D__', $total14DayViews `
+  -replace '__TOTAL_FORKS__', $totalForks `
+  -replace '__TOTAL_REPOS__', $analyzedRepos.Count `
+  -replace '__TRAFFIC_HTML__', $trafficHtml `
+  -replace '__RADAR_QUERY_QUOTED__', $radarQueryQuoted `
+  -replace '__RADAR_QUERY_PLAIN__', $radarQueryPlain `
+  -replace '__RADAR_TERMS_DISPLAY__', $radarTermsDisplay `
+  -replace '__GENERATED_AT__', $generatedAt `
+  -replace '__REPOS_JSON__', $reposJson `
+  -replace '__ROLLING_14_JSON__', $rolling14Json `
+  -replace '__CUMULATIVE_YEAR_JSON__', $cumulativeYearJson `
+  -replace '__BY_REPO_DAILY_JSON__', $byRepoDailyJson `
+  -replace '__RELEASES_JSON__', $allReleasesJson `
+  -replace '__HISTORY_JSON__', $historyCompressed
 
 Set-Content -Path $reportFile -Value $htmlContent -Encoding UTF8
 
@@ -2116,8 +2184,8 @@ Write-Host "      $reportFile" -ForegroundColor White
 Write-Host ""
 
 if (-not $NoBrowser) {
-    Write-Host "  [+] Opening in your default browser..." -ForegroundColor Cyan
-    Start-Process -FilePath $reportFile
+  Write-Host "  [+] Opening in your default browser..." -ForegroundColor Cyan
+  Start-Process -FilePath $reportFile
 }
 
 Write-Host "  Done!" -ForegroundColor Green
