@@ -1024,9 +1024,12 @@ $htmlTemplate = @'
       background: rgba(15, 23, 42, 0.55); border: 1px solid rgba(255, 255, 255, 0.06);
       border-radius: 14px; padding: 1.15rem; display: flex; flex-direction: column; justify-content: space-between;
     }
-    .funnel-card-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 0.5rem; }
+    .funnel-card-header { display: flex; justify-content: space-between; align-items: center; gap: 0.5rem; margin-bottom: 0.5rem; }
     .funnel-card-label { font-size: 0.82rem; font-weight: 600; color: #94a3b8; }
-    .funnel-pill { font-size: 0.7rem; font-weight: 700; padding: 0.15rem 0.5rem; border-radius: 9999px; }
+    .funnel-pill {
+      font-size: 0.7rem; font-weight: 700; padding: 0.2rem 0.6rem; border-radius: 9999px;
+      text-align: center; white-space: nowrap; flex-shrink: 0; display: inline-flex; align-items: center; justify-content: center;
+    }
     .funnel-card-val { font-size: 1.65rem; font-weight: 800; font-family: 'JetBrains Mono', monospace; }
     .funnel-card-formula { font-size: 0.72rem; color: #64748b; margin-top: 0.25rem; }
     .funnel-card-desc { font-size: 0.78rem; color: #cbd5e1; margin-top: 0.6rem; line-height: 1.35; }
@@ -1111,7 +1114,7 @@ $htmlTemplate = @'
     .radar-meta-sub { display: block; font-size: 0.72rem; color: #94a3b8; margin-top: 0.15rem; }
 
     /* Inbound Referrers / Traffic */
-    .traffic-box { background: rgba(15, 23, 42, 0.6); border: 1px solid var(--card-border); border-radius: 14px; padding: 1.25rem; }
+    .traffic-box { background: rgba(15, 23, 42, 0.6); border: 1px solid var(--card-border); border-radius: 14px; padding: 1.25rem; overflow-x: auto; min-width: 0; }
     .traffic-title { font-size: 0.95rem; font-weight: 700; color: #38bdf8; margin-bottom: 0.5rem; }
     .traffic-table { width: 100%; border-collapse: collapse; font-size: 0.84rem; }
     .traffic-table th, .traffic-table td { padding: 0.6rem; text-align: left; border-bottom: 1px solid rgba(255, 255, 255, 0.06); }
@@ -1163,13 +1166,16 @@ $htmlTemplate = @'
     .metric-val { font-size: 0.88rem; font-weight: 700; font-family: 'JetBrains Mono', monospace; }
     .metric-lbl { font-size: 0.68rem; color: var(--text-muted); text-transform: uppercase; }
 
-    .repo-conv-bar { display: flex; flex-wrap: wrap; gap: 0.35rem; margin-top: 0.65rem; }
+    .repo-conv-bar { display: flex; flex-wrap: wrap; align-items: center; gap: 0.35rem; margin-top: 0.65rem; }
     .conv-tag {
-      font-size: 0.68rem; padding: 0.15rem 0.45rem; border-radius: 4px; font-weight: 600;
-      background: rgba(255, 255, 255, 0.04); color: #94a3b8; border: 1px solid rgba(255, 255, 255, 0.06);
+      font-size: 0.68rem; padding: 0.2rem 0.45rem; border-radius: 4px; font-weight: 600;
+      background: rgba(255, 255, 255, 0.04); color: #64748b; border: 1px solid rgba(255, 255, 255, 0.06);
+      display: inline-flex; align-items: center; gap: 0.25rem; line-height: 1.2;
     }
-    .conv-tag.active { border-color: rgba(56, 189, 248, 0.3); color: #bae6fd; background: rgba(56, 189, 248, 0.08); }
-    .conv-persona { font-weight: 700; color: #c084fc; border-color: rgba(192, 132, 252, 0.3); background: rgba(192, 132, 252, 0.08); }
+    .conv-tag-star.active { border-color: rgba(251, 191, 36, 0.35); color: #fbbf24; background: rgba(251, 191, 36, 0.1); }
+    .conv-tag-dl.active { border-color: rgba(52, 211, 153, 0.35); color: #34d399; background: rgba(52, 211, 153, 0.1); }
+    .conv-tag-dev.active { border-color: rgba(56, 189, 248, 0.35); color: #38bdf8; background: rgba(56, 189, 248, 0.1); }
+    .conv-persona { font-weight: 700; color: #c084fc; border-color: rgba(192, 132, 252, 0.35); background: rgba(192, 132, 252, 0.1); margin-left: auto; }
 
     .repo-footer { display: flex; justify-content: space-between; align-items: center; margin-top: 0.75rem; font-size: 0.75rem; color: var(--text-muted); }
 
@@ -1429,7 +1435,8 @@ $htmlTemplate = @'
 
     if (Array.isArray(repos)) {
       repos.forEach(r => {
-        r.Topics = Array.isArray(r.Topics) ? r.Topics : (r.Topics ? [r.Topics] : []);
+        r.Topics = (Array.isArray(r.Topics) ? r.Topics : [])
+          .filter(t => typeof t === 'string' && t.trim().length > 0 && t !== '[object Object]');
         r.Description = r.Description || '';
         r.Language = r.Language || 'General';
         r.License = r.License || '';
@@ -1807,7 +1814,7 @@ $htmlTemplate = @'
     }
 
     function calculateRepoConversions(r) {
-      const views = Math.max(r.Views14Days || 0, 1);
+      const rawViews = r.Views14Days || 0;
       const uniqueClones = r.UniqueClones14Days || 0;
       const totalClones = r.Clones14Days || 0;
       
@@ -1815,10 +1822,12 @@ $htmlTemplate = @'
       const botPercent = totalClones > 0 ? Math.round((botPulls / totalClones) * 100) : 0;
       const cloneRepeat = uniqueClones > 0 ? (totalClones / uniqueClones).toFixed(1) : 1;
 
-      const cloneRateNum = Math.min(100, (uniqueClones / views) * 100);
-      const starRateNum = Math.min(100, (r.Stars / views) * 100);
-      const dlMultiplier = (r.Downloads / views).toFixed(1);
-      const dlRateNum = Math.min(100, (r.Downloads / Math.max(views, r.Downloads)) * 100);
+      // Only calculate visitor conversion if repo has recorded views in the 14d window
+      const cloneRateNum = rawViews > 0 ? Math.min(100, (uniqueClones / rawViews) * 100) : 0;
+      const starRateNum = rawViews > 0 ? Math.min(100, (r.Stars / rawViews) * 100) : 0;
+      const starRate = starRateNum.toFixed(1);
+      const dlMultiplier = rawViews > 0 ? (r.Downloads / rawViews).toFixed(1) : '0.0';
+      const dlRateNum = rawViews > 0 ? Math.min(100, (r.Downloads / Math.max(rawViews, r.Downloads)) * 100) : 0;
 
       let persona = 'Hybrid Dev/App';
       let personaIcon = '&#x2696;&#xFE0F;';
@@ -1837,9 +1846,10 @@ $htmlTemplate = @'
       }
 
       return {
+        rawViews,
         dlRate: dlRateNum.toFixed(1),
         dlMultiplier,
-        starRate: starRateNum.toFixed(1),
+        starRate,
         cloneRate: cloneRateNum.toFixed(1),
         dlRateNum,
         starRateNum,
@@ -1946,7 +1956,7 @@ $htmlTemplate = @'
         <span class="funnel-arrow">&xrarr;</span>
 
         <div class="funnel-stage">
-          <div class="stage-pill" style="border: 1px solid rgba(56, 189, 248, 0.3); color: #38bdf8;" title="Distinct developers pulling code">
+          <div class="stage-pill" style="border: 1px solid rgba(56, 189, 248, 0.3); color: #38bdf8;" title="Devs: ${total14dUniqueClones} unique client IPs or user accounts that cloned repositories via git in the last 14 days">
             &#x1F464; <strong>${total14dUniqueClones}</strong> Devs (${humanCloneRate}%)
           </div>
         </div>
@@ -2030,8 +2040,9 @@ $htmlTemplate = @'
 
       container.innerHTML = filtered.map(r => {
         const langColor = languageColors[r.Language] || '#38bdf8';
-        const topics = Array.isArray(r.Topics) ? r.Topics : [];
-        const topicsHtml = topics.slice(0, 6).map(t => `<span class="topic-tag">#${t}</span>`).join('');
+        const topics = (Array.isArray(r.Topics) ? r.Topics : [])
+          .filter(t => typeof t === 'string' && t.trim().length > 0 && t !== '[object Object]');
+        const topicsHtml = topics.slice(0, 6).map(t => `<span class="topic-tag">#${t.trim()}</span>`).join('');
         const extraTopics = topics.length > 6 ? `<span class="topic-tag">+${topics.length - 6}</span>` : '';
         const badge = r.IsFork ? '<span class="badge-fork">&#x1F500; Fork</span>' : '<span class="badge-source">&#x2728; Original</span>';
         const releaseBadge = r.LatestReleaseTag ? `<span class="badge-release" title="Latest release: ${r.LatestReleaseTag}">&#x1F4E6; ${r.LatestReleaseTag}</span>` : '';
@@ -2100,9 +2111,9 @@ $htmlTemplate = @'
               </div>
 
               <div class="repo-conv-bar">
-                <span class="conv-tag ${conv.starRateNum > 0 ? 'active' : ''}" title="Star Conversion: ${conv.starRate}% of visitors starred this repo">&#x2B50; ${conv.starRate}% Star Conv</span>
-                <span class="conv-tag ${conv.dlRateNum > 0 ? 'active' : ''}" title="Release Downloads: ${r.Downloads} packages (${conv.dlMultiplier}x per visitor)">&#x1F4E5; ${r.Downloads} DLs (${conv.dlMultiplier}x)</span>
-                <span class="conv-tag ${conv.cloneRateNum > 0 ? 'active' : ''}" title="Unique Dev Clones: ${conv.uniqueClones} unique devs (${conv.totalClones} total pulls &bull; ${conv.botPercent}% automated)">&#x1F680; ${conv.uniqueClones} Devs <span style="opacity:0.65;font-size:0.62rem;">(+${conv.botPulls} &#x1F916;)</span></span>
+                <span class="conv-tag conv-tag-star ${conv.starRateNum > 0 ? 'active' : ''}" title="${conv.rawViews > 0 ? `Star Conversion: ${conv.starRate}% of visitors starred this repo` : 'No 14-day views recorded yet'}">&#x2B50; ${conv.rawViews > 0 ? `${conv.starRate}%` : '0.0%'} Star Conv</span>
+                <span class="conv-tag conv-tag-dl ${conv.dlRateNum > 0 ? 'active' : ''}" title="${conv.rawViews > 0 ? `Release Downloads: ${r.Downloads} packages (${conv.dlMultiplier}x per visitor)` : `Release Downloads: ${r.Downloads} packages total`}">&#x1F4E5; ${r.Downloads} DLs (${conv.dlMultiplier}x)</span>
+                <span class="conv-tag conv-tag-dev ${conv.uniqueClones > 0 ? 'active' : ''}" title="Devs: ${conv.uniqueClones} unique client IPs or user accounts that cloned this repo in the last 14 days (${conv.totalClones} total git pulls &bull; +${conv.botPulls} repeat/CI pulls)">&#x1F680; ${conv.uniqueClones} Devs <span style="opacity:0.65;font-size:0.62rem;">(+${conv.botPulls} &#x1F916;)</span></span>
                 <span class="conv-tag conv-persona" title="Audience Classification">${conv.personaIcon} ${conv.persona}</span>
               </div>
 
