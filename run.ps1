@@ -131,9 +131,7 @@ elseif (Test-Path -Path $tokenFile) {
     $enc = if ($rawEnc) { $rawEnc.Trim() } else { "" }
     if (-not [string]::IsNullOrWhiteSpace($enc)) {
       $sec = ConvertTo-SecureString $enc
-      $bstr = [System.Runtime.InteropServices.Marshal]::SecureStringToBSTR($sec)
-      $resolvedToken = [System.Runtime.InteropServices.Marshal]::PtrToStringAuto($bstr)
-      [System.Runtime.InteropServices.Marshal]::ZeroFreeBSTR($bstr)
+      $resolvedToken = [System.Net.NetworkCredential]::new('', $sec).Password
     }
   }
   catch {
@@ -148,7 +146,7 @@ else {
     try {
       $sec = ConvertTo-SecureString $resolvedToken -AsPlainText -Force
       $enc = ConvertFrom-SecureString $sec
-      Set-Content -Path $tokenFile -Value $enc -Encoding UTF8
+      Set-Content -Path $tokenFile -Value $enc -Encoding UTF8 -NoNewline
       Write-Host "  [+] Imported and encrypted existing token into Windows DPAPI storage." -ForegroundColor Green
     }
     catch {}
@@ -162,9 +160,7 @@ else {
     Write-Host ""
     try {
       $secInput = Read-Host -Prompt "  Paste GitHub Token (hidden, press Enter to skip)" -AsSecureString
-      $bstr = [System.Runtime.InteropServices.Marshal]::SecureStringToBSTR($secInput)
-      $plain = [System.Runtime.InteropServices.Marshal]::PtrToStringAuto($bstr)
-      [System.Runtime.InteropServices.Marshal]::ZeroFreeBSTR($bstr)
+      $plain = [System.Net.NetworkCredential]::new('', $secInput).Password
             
       if (-not [string]::IsNullOrWhiteSpace($plain)) {
         $enc = ConvertFrom-SecureString $secInput
