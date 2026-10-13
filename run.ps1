@@ -120,18 +120,21 @@ if (-not [string]::IsNullOrWhiteSpace($Token)) {
   try {
     $sec = ConvertTo-SecureString $resolvedToken -AsPlainText -Force
     $enc = ConvertFrom-SecureString $sec
-    Set-Content -Path $tokenFile -Value $enc -Encoding UTF8
+    Set-Content -Path $tokenFile -Value $enc -Encoding UTF8 -NoNewline
     Write-Host "  [+] New token encrypted and saved to Windows DPAPI storage." -ForegroundColor Green
   }
   catch {}
 }
 elseif (Test-Path -Path $tokenFile) {
   try {
-    $enc = Get-Content -Path $tokenFile -Raw
-    $sec = ConvertTo-SecureString $enc
-    $bstr = [System.Runtime.InteropServices.Marshal]::SecureStringToBSTR($sec)
-    $resolvedToken = [System.Runtime.InteropServices.Marshal]::PtrToStringAuto($bstr)
-    [System.Runtime.InteropServices.Marshal]::ZeroFreeBSTR($bstr)
+    $rawEnc = Get-Content -Path $tokenFile -Raw
+    $enc = if ($rawEnc) { $rawEnc.Trim() } else { "" }
+    if (-not [string]::IsNullOrWhiteSpace($enc)) {
+      $sec = ConvertTo-SecureString $enc
+      $bstr = [System.Runtime.InteropServices.Marshal]::SecureStringToBSTR($sec)
+      $resolvedToken = [System.Runtime.InteropServices.Marshal]::PtrToStringAuto($bstr)
+      [System.Runtime.InteropServices.Marshal]::ZeroFreeBSTR($bstr)
+    }
   }
   catch {
     Write-Host "  [!] Could not decrypt saved token. Continuing in public mode." -ForegroundColor DarkYellow
@@ -165,7 +168,7 @@ else {
             
       if (-not [string]::IsNullOrWhiteSpace($plain)) {
         $enc = ConvertFrom-SecureString $secInput
-        Set-Content -Path $tokenFile -Value $enc -Encoding UTF8
+        Set-Content -Path $tokenFile -Value $enc -Encoding UTF8 -NoNewline
         $resolvedToken = $plain.Trim()
         Write-Host "  [+] Token encrypted and saved safely to LocalAppData." -ForegroundColor Green
       }
