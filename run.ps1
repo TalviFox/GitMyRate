@@ -40,9 +40,11 @@ $avatarIco = Join-Path -Path $appDataDir -ChildPath "avatar.ico"
 $launcherPs1 = Join-Path -Path $appDataDir -ChildPath "launcher.ps1"
 $migratedMarker = Join-Path -Path $appDataDir -ChildPath ".migrated"
 
+$ScriptVersion = "1.1.0"
+
 Write-Host ""
 Write-Host "   ======================================================" -ForegroundColor Cyan
-Write-Host "            GitMyRate - Audience, Radar & Vitals         " -ForegroundColor White
+Write-Host "        GitMyRate v$ScriptVersion - Audience, Radar & Vitals     " -ForegroundColor White
 Write-Host "   ======================================================" -ForegroundColor Cyan
 Write-Host ""
 
@@ -269,7 +271,7 @@ if ((Test-Path -Path $reportFile) -and -not $Force) {
   }
 }
 
-if ($alreadyScannedToday -and -not $Force) {
+if ($alreadyScannedToday -and -not $Force -and -not $CreateShortcut) {
   Write-Host "  [i] Already scanned GitHub today at $($lastScanTime.ToString('h:mm tt'))." -ForegroundColor Yellow
   Write-Host "      GitHub traffic stats (views/clones) only batch once every 24h at 00:00 UTC." -ForegroundColor DarkGray
   Write-Host ""
@@ -513,6 +515,24 @@ foreach ($repo in $repos) {
       $repo14DayUniqueClones = [int]$clonesData.uniques
       $total14DayClones += $repo14DayClones
       $total14DayUniqueClones += $repo14DayUniqueClones
+
+      if ($clonesData.clones) {
+        foreach ($c in $clonesData.clones) {
+          $dayKey = ([DateTime]::Parse($c.timestamp)).ToString("yyyy-MM-dd")
+          $cCount = [int]$c.count
+          if (-not $archive.ContainsKey($dayKey)) {
+            $archive[$dayKey] = [PSCustomObject]@{
+              views   = [PSCustomObject]@{}
+              uniques = [PSCustomObject]@{}
+              clones  = [PSCustomObject]@{}
+            }
+          }
+          if (-not $archive[$dayKey].clones) {
+            $archive[$dayKey] | Add-Member -MemberType NoteProperty -Name clones -Value ([PSCustomObject]@{}) -Force
+          }
+          $archive[$dayKey].clones | Add-Member -MemberType NoteProperty -Name $repo.name -Value $cCount -Force
+        }
+      }
     }
     catch {
       if ($_.ToString() -match "403" -or $_.ToString() -match "Resource not accessible") {
@@ -535,6 +555,19 @@ foreach ($repo in $repos) {
   $lang = if ($repo.language) { $repo.language } else { "General" }
   if ($lang -eq "PowerShell") { $lang = "PoSH" }
 
+  # Detect Today's activity
+  $repoTodayViews = 0
+  $repoTodayUniques = 0
+  $localTodayKey = (Get-Date).ToString("yyyy-MM-dd")
+  $utcTodayKey = ([DateTime]::UtcNow).ToString("yyyy-MM-dd")
+  if ($repoDailyData.ContainsKey($localTodayKey)) {
+    $repoTodayViews = [int]$repoDailyData[$localTodayKey].views
+    $repoTodayUniques = [int]$repoDailyData[$localTodayKey].uniques
+  } elseif ($repoDailyData.ContainsKey($utcTodayKey)) {
+    $repoTodayViews = [int]$repoDailyData[$utcTodayKey].views
+    $repoTodayUniques = [int]$repoDailyData[$utcTodayKey].uniques
+  }
+
   $analyzedRepos.Add([PSCustomObject]@{
       Name               = $repo.name
       FullName           = $repo.full_name
@@ -556,6 +589,8 @@ foreach ($repo in $repos) {
       License            = $detectedLicense
       Views14Days        = $repo14DayViews
       Uniques14Days      = $repo14DayUniques
+      ViewsToday         = $repoTodayViews
+      UniquesToday       = $repoTodayUniques
       Clones14Days       = $repo14DayClones
       UniqueClones14Days = $repo14DayUniqueClones
     })
@@ -568,6 +603,24 @@ if ($trafficPermissionBlocked) {
 
 # Save permanent yearly archive to disk
 $archive | ConvertTo-Json -Depth 5 | Set-Content -Path $yearlyFile -Encoding UTF8
+
+# Attach AllTime cumulative traffic to analyzed repositories from archive
+foreach ($r in $analyzedRepos) {
+  $cumV = 0
+  $cumU = 0
+  foreach ($dKey in $archive.Keys) {
+    if ($archive[$dKey].views -and $archive[$dKey].views.psobject.Properties[$r.Name]) {
+      $cumV += [int]$archive[$dKey].views.psobject.Properties[$r.Name].Value
+    }
+    if ($archive[$dKey].uniques -and $archive[$dKey].uniques.psobject.Properties[$r.Name]) {
+      $cumU += [int]$archive[$dKey].uniques.psobject.Properties[$r.Name].Value
+    }
+  }
+  $allV = [Math]::Max([int]$r.Views14Days, $cumV)
+  $allU = [Math]::Max([int]$r.Uniques14Days, $cumU)
+  $r | Add-Member -MemberType NoteProperty -Name "AllTimeViews" -Value $allV -Force
+  $r | Add-Member -MemberType NoteProperty -Name "AllTimeUniques" -Value $allU -Force
+}
 
 # Build Rolling 14-day list
 $chartRolling14List = [System.Collections.Generic.List[PSObject]]::new()
@@ -744,7 +797,7 @@ $currentSnapshot = [PSCustomObject]@{
   totalClones14d       = $total14DayClones
   totalUniqueClones14d = $total14DayUniqueClones
   yearCumulativeViews  = $runningCombinedViews
-  repos                = ($analyzedRepos | Select-Object Name, Stars, Downloads, Forks, Views14Days, License, Language)
+  repos                = ($analyzedRepos | Select-Object Name, Stars, Downloads, Forks, Views14Days, AllTimeViews, AllTimeUniques, License, Language)
 }
 
 $historyList = [System.Collections.Generic.List[PSObject]]::new()
@@ -788,22 +841,111 @@ try {
   $b64 = [Convert]::ToBase64String($avatarBytes)
   $avatarDataUri = "data:image/png;base64,$b64"
 
-  Add-Type -AssemblyName System.Drawing -ErrorAction SilentlyContinue
-  if ([System.Type]::GetType("System.Drawing.Bitmap")) {
+  try {
+    Add-Type -AssemblyName System.Drawing -ErrorAction Stop
     $ms = [System.IO.MemoryStream]::new($avatarBytes)
-    $bmp = [System.Drawing.Bitmap]::FromStream($ms)
-    $thumb = [System.Drawing.Bitmap]::new($bmp, [System.Drawing.Size]::new(64, 64))
-    $hIcon = $thumb.GetHicon()
-    $ico = [System.Drawing.Icon]::FromHandle($hIcon)
-    $fs = [System.IO.FileStream]::new($avatarIco, [System.IO.FileMode]::Create)
-    $ico.Save($fs)
-    $fs.Close()
-    $fs.Dispose()
-    $ico.Dispose()
-    $thumb.Dispose()
-    $bmp.Dispose()
+    $srcBmp = [System.Drawing.Bitmap]::FromStream($ms)
+
+    # Build 5-Resolution 32-bit TrueColor ARGB ICO (32, 48, 64, 128 DIB + 256 PNG)
+    $sizes = @(32, 48, 64, 128, 256)
+    $frames = [System.Collections.Generic.List[byte[]]]::new()
+
+    foreach ($sz in $sizes) {
+      $thumb = New-Object System.Drawing.Bitmap $sz, $sz, ([System.Drawing.Imaging.PixelFormat]::Format32bppArgb)
+      $gt = [System.Drawing.Graphics]::FromImage($thumb)
+      $gt.InterpolationMode = [System.Drawing.Drawing2D.InterpolationMode]::HighQualityBicubic
+      $gt.SmoothingMode = [System.Drawing.Drawing2D.SmoothingMode]::HighQuality
+      $gt.PixelOffsetMode = [System.Drawing.Drawing2D.PixelOffsetMode]::HighQuality
+      $gt.DrawImage($srcBmp, 0, 0, $sz, $sz)
+      $gt.Dispose()
+
+      if ($sz -eq 256) {
+        $pMs = New-Object System.IO.MemoryStream
+        $thumb.Save($pMs, [System.Drawing.Imaging.ImageFormat]::Png)
+        $frames.Add($pMs.ToArray())
+        $pMs.Dispose()
+      }
+      else {
+        $rect = New-Object System.Drawing.Rectangle 0, 0, $sz, $sz
+        $bData = $thumb.LockBits($rect, [System.Drawing.Imaging.ImageLockMode]::ReadOnly, [System.Drawing.Imaging.PixelFormat]::Format32bppArgb)
+        $stride = $bData.Stride
+        $px = New-Object byte[] ($stride * $sz)
+        [System.Runtime.InteropServices.Marshal]::Copy($bData.Scan0, $px, 0, $px.Length)
+        $thumb.UnlockBits($bData)
+
+        $dib = New-Object byte[] ($stride * $sz)
+        for ($y = 0; $y -lt $sz; $y++) {
+          [Array]::Copy($px, ($sz - 1 - $y) * $stride, $dib, $y * $stride, $stride)
+        }
+        $mask = New-Object byte[] ([int]([Math]::Ceiling($sz / 32.0) * 4 * $sz))
+
+        $fMs = New-Object System.IO.MemoryStream
+        $fBw = New-Object System.IO.BinaryWriter $fMs
+        $fBw.Write([UInt32]40)
+        $fBw.Write([Int32]$sz)
+        $fBw.Write([Int32]($sz * 2))
+        $fBw.Write([UInt16]1)
+        $fBw.Write([UInt16]32)
+        $fBw.Write([UInt32]0)
+        $fBw.Write([UInt32]($dib.Length + $mask.Length))
+        $fBw.Write([Int32]0)
+        $fBw.Write([Int32]0)
+        $fBw.Write([UInt32]0)
+        $fBw.Write([UInt32]0)
+        $fBw.Write($dib)
+        $fBw.Write($mask)
+        $fBw.Flush()
+        $frames.Add($fMs.ToArray())
+        $fBw.Dispose()
+        $fMs.Dispose()
+      }
+      $thumb.Dispose()
+    }
+    $srcBmp.Dispose()
     $ms.Dispose()
+
+    $icoMs = New-Object System.IO.MemoryStream
+    $bw = New-Object System.IO.BinaryWriter $icoMs
+    $bw.Write([UInt16]0) # Reserved
+    $bw.Write([UInt16]1) # Icon type
+    $bw.Write([UInt16]$sizes.Count)
+
+    $offset = 6 + (16 * $sizes.Count)
+    for ($i = 0; $i -lt $sizes.Count; $i++) {
+      $sz = $sizes[$i]
+      $bSz = if ($sz -eq 256) { [Byte]0 } else { [Byte]$sz }
+      $dataLen = $frames[$i].Length
+      $bw.Write($bSz)
+      $bw.Write($bSz)
+      $bw.Write([Byte]0)
+      $bw.Write([Byte]0)
+      $bw.Write([UInt16]1)
+      $bw.Write([UInt16]32)
+      $bw.Write([UInt32]$dataLen)
+      $bw.Write([UInt32]$offset)
+      $offset += $dataLen
+    }
+    for ($i = 0; $i -lt $sizes.Count; $i++) {
+      $bw.Write($frames[$i])
+    }
+    $bw.Flush()
+
+    $icoBytes = $icoMs.ToArray()
+    $bw.Dispose()
+    $icoMs.Dispose()
+
+    # Save primary avatar.ico + content-hashed filename to bypass Windows Explorer's locked IconCache.db
+    [System.IO.File]::WriteAllBytes($avatarIco, $icoBytes)
+    $sha = [System.Security.Cryptography.SHA256]::Create()
+    $icoHash = [BitConverter]::ToString($sha.ComputeHash($icoBytes)).Replace("-", "").Substring(0, 8).ToLower()
+    $sha.Dispose()
+    Get-ChildItem -Path $appDataDir -Filter "avatar-*.ico" -ErrorAction SilentlyContinue | Remove-Item -Force -ErrorAction SilentlyContinue
+    $avatarIco = Join-Path -Path $appDataDir -ChildPath "avatar-$icoHash.ico"
+    [System.IO.File]::WriteAllBytes($avatarIco, $icoBytes)
     $hasCustomIcon = $true
+  }
+  catch {
+    $hasCustomIcon = $false
   }
 }
 catch {
@@ -829,8 +971,11 @@ if (Test-Path `$report) {
 "@
 Set-Content -Path $launcherPs1 -Value $launcherContent -Encoding UTF8
 
-if ($CreateShortcut -or (-not (Test-Path $shortcutFile))) {
+if ($CreateShortcut -or (-not (Test-Path $shortcutFile)) -or ($hasCustomIcon -and (Test-Path $avatarIco))) {
   try {
+    if (Test-Path $shortcutFile) {
+      Remove-Item $shortcutFile -Force -ErrorAction SilentlyContinue
+    }
     $wsh = New-Object -ComObject WScript.Shell
     $sc = $wsh.CreateShortcut($shortcutFile)
     $sc.TargetPath = "powershell.exe"
@@ -844,15 +989,16 @@ if ($CreateShortcut -or (-not (Test-Path $shortcutFile))) {
       $sc.IconLocation = "$env:SystemRoot\System32\shell32.dll,22"
     }
     $sc.Save()
-    Write-Host "  [+] Desktop Shortcut created: 'GitMyRate ($Username).lnk'" -ForegroundColor Green
+    Start-Process -FilePath "$env:SystemRoot\System32\ie4uinit.exe" -ArgumentList "-show" -WindowStyle Hidden -Wait -ErrorAction SilentlyContinue
+    Write-Host "  [+] Desktop Shortcut saved: 'GitMyRate ($Username).lnk'" -ForegroundColor Green
   }
   catch {}
 }
 
 Write-Host "  [4/4] Rendering GitMyRate HTML Dashboard..." -ForegroundColor Cyan
 
-# Prepare radar queries
-$searchTerms = @($analyzedRepos | ForEach-Object { $_.Name }) + @($Username) | Select-Object -Unique
+# Prepare radar queries (exclude forks so generic repos like android/winget-pkgs don't pollute queries)
+$searchTerms = @($analyzedRepos | Where-Object { -not $_.IsFork } | ForEach-Object { $_.Name }) + @($Username) | Select-Object -Unique
 $radarQueryQuoted = ($searchTerms | ForEach-Object { "%22" + [System.Web.HttpUtility]::UrlEncode($_) + "%22" }) -join "+OR+"
 $radarQueryPlain = ($searchTerms | ForEach-Object { [System.Web.HttpUtility]::UrlEncode($_) }) -join "+OR+"
 $radarTermsDisplay = ($searchTerms | ForEach-Object { "<code>$_</code>" }) -join ", "
@@ -873,7 +1019,8 @@ if ($isAuthenticated) {
   $cloneRows = ""
   $reposWithClones = $analyzedRepos | Where-Object { -not $_.IsFork } | Sort-Object -Descending Clones14Days
   foreach ($r in $reposWithClones) {
-    $cloneRows += "<tr><td><strong>$($r.Name)</strong></td><td style='color:#34d399; font-weight:700;'>$($r.Clones14Days)</td><td style='color:var(--text-muted);'>$($r.Views14Days) views</td></tr>"
+    $allTimeViewsDisplay = if ($r.AllTimeViews -gt $r.Views14Days) { "$($r.AllTimeViews) total" } else { "$($r.Views14Days) views" }
+    $cloneRows += "<tr><td><strong>$($r.Name)</strong></td><td style='color:#34d399; font-weight:700;'>$($r.Clones14Days)</td><td style='color:var(--text-muted);'>$($r.Views14Days) (14d) &bull; $allTimeViewsDisplay</td></tr>"
   }
 
   $trafficHtml = @"
@@ -892,7 +1039,7 @@ if ($isAuthenticated) {
         <div class="traffic-title" style="color: #34d399;">&#x1F680; Git Clones &amp; Adoption (Past 14 Days: $total14DayClones total)</div>
         <table class="traffic-table">
           <thead>
-            <tr><th>Repository</th><th>14d Clones</th><th>14d Views</th></tr>
+            <tr><th>Repository</th><th>14d Clones</th><th>Views (14d &bull; Lifetime)</th></tr>
           </thead>
           <tbody>$cloneRows</tbody>
         </table>
@@ -1069,16 +1216,245 @@ $htmlTemplate = @'
     }
     .chart-metric-btn.active { background: rgba(56, 189, 248, 0.2); border-color: #38bdf8; color: #38bdf8; font-weight: 700; }
 
-    .bars-container { display: flex; align-items: flex-end; gap: 8px; height: 180px; padding: 1rem 0.5rem 0.5rem 0.5rem; }
-    .bar-col { flex: 1; display: flex; flex-direction: column; align-items: center; height: 100%; justify-content: flex-end; position: relative; }
-    .bar-fill {
-      width: 100%; min-height: 4px; border-radius: 6px 6px 0 0;
-      background: linear-gradient(180deg, #38bdf8 0%, #0284c7 100%);
-      transition: height 0.4s cubic-bezier(0.16, 1, 0.3, 1);
+    .chart-viewport {
+      display: flex;
+      margin-top: 0.75rem;
+      position: relative;
     }
-    .bar-col:hover .bar-fill { background: linear-gradient(180deg, #7dd3fc 0%, #0369a1 100%); }
-    .bars-x-axis { display: flex; gap: 8px; padding: 0.5rem; border-top: 1px solid rgba(255, 255, 255, 0.08); }
-    .x-label { flex: 1; text-align: center; font-size: 0.72rem; color: var(--text-muted); font-family: 'JetBrains Mono', monospace; }
+    .chart-y-axis {
+      display: flex;
+      flex-direction: column;
+      justify-content: space-between;
+      align-items: flex-end;
+      width: 32px;
+      padding-right: 8px;
+      height: 185px;
+      color: var(--text-muted);
+      font-size: 0.68rem;
+      font-family: 'JetBrains Mono', monospace;
+      user-select: none;
+      padding-bottom: 2px;
+    }
+    .chart-stage {
+      flex: 1;
+      position: relative;
+      display: flex;
+      flex-direction: column;
+      min-width: 0;
+    }
+    .chart-grid-lines {
+      position: absolute;
+      top: 0;
+      left: 0;
+      right: 0;
+      height: 185px;
+      pointer-events: none;
+      display: flex;
+      flex-direction: column;
+      justify-content: space-between;
+    }
+    .chart-grid-line {
+      width: 100%;
+      border-bottom: 1px dashed rgba(255, 255, 255, 0.07);
+    }
+    .chart-grid-line:last-child {
+      border-bottom: 1px solid rgba(255, 255, 255, 0.14);
+    }
+    .bars-container {
+      display: flex;
+      align-items: flex-end;
+      gap: 8px;
+      height: 185px;
+      padding: 0 0.5rem;
+      position: relative;
+      z-index: 1;
+    }
+    .bar-col {
+      flex: 1;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      height: 100%;
+      justify-content: flex-end;
+      position: relative;
+      cursor: pointer;
+    }
+    .bar-val {
+      font-size: 0.75rem;
+      font-weight: 800;
+      color: #38bdf8;
+      font-family: 'JetBrains Mono', monospace;
+      margin-bottom: 4px;
+      text-shadow: 0 2px 4px rgba(0, 0, 0, 0.6);
+      white-space: nowrap;
+      pointer-events: none;
+      transition: transform 0.15s ease, color 0.15s ease;
+    }
+    .bar-col:hover .bar-val {
+      transform: translateY(-2px);
+      color: #fff;
+    }
+    .bar-val.today-live {
+      color: #34d399;
+      font-size: 0.78rem;
+    }
+    .bar-val.today-zero {
+      color: rgba(148, 163, 184, 0.45);
+      font-size: 0.65rem;
+      font-weight: 600;
+    }
+    .bar-fill {
+      width: 100%;
+      border-radius: 6px 6px 0 0;
+      background: linear-gradient(180deg, #38bdf8 0%, #0284c7 100%);
+      transition: height 0.4s cubic-bezier(0.16, 1, 0.3, 1), background 0.2s ease, box-shadow 0.2s ease;
+    }
+    .bar-col:hover .bar-fill {
+      background: linear-gradient(180deg, #7dd3fc 0%, #0369a1 100%);
+      box-shadow: 0 0 12px rgba(56, 189, 248, 0.4);
+    }
+    .bar-col.is-today .bar-fill {
+      background: linear-gradient(180deg, #34d399 0%, #059669 100%);
+      box-shadow: 0 0 10px rgba(52, 211, 153, 0.4);
+    }
+    .bar-col.is-zero .bar-fill {
+      display: none;
+    }
+    .zero-baseline-dot {
+      width: 4px;
+      height: 4px;
+      border-radius: 50%;
+      background: rgba(255, 255, 255, 0.15);
+      margin-bottom: 2px;
+      transition: transform 0.15s ease, background 0.15s ease;
+    }
+    .bar-col:hover .zero-baseline-dot {
+      background: rgba(255, 255, 255, 0.6);
+      transform: scale(1.4);
+    }
+    .bar-col.is-today .zero-baseline-dot {
+      background: #34d399;
+      box-shadow: 0 0 6px rgba(52, 211, 153, 0.6);
+    }
+    .bars-x-axis {
+      display: flex;
+      gap: 8px;
+      padding: 0.5rem 0.5rem 0 0.5rem;
+      border-top: 1px solid rgba(255, 255, 255, 0.08);
+      position: relative;
+      z-index: 1;
+    }
+    .x-label {
+      flex: 1;
+      text-align: center;
+      font-size: 0.72rem;
+      color: var(--text-muted);
+      font-family: 'JetBrains Mono', monospace;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 2px;
+    }
+    .x-label.is-today {
+      color: #34d399;
+      font-weight: 700;
+    }
+    .today-badge {
+      display: inline-block;
+      font-size: 0.55rem;
+      font-weight: 800;
+      color: #0f172a;
+      background: #34d399;
+      padding: 1px 4px;
+      border-radius: 3px;
+      letter-spacing: 0.03em;
+    }
+
+    /* Heatmap Styles */
+    .heatmap-container {
+      padding: 0.5rem 0.25rem 0 0.25rem;
+    }
+    .heatmap-wrap {
+      display: flex;
+      flex-direction: column;
+      overflow-x: auto;
+      padding-bottom: 0.5rem;
+    }
+    .heatmap-body {
+      display: flex;
+      gap: 8px;
+      align-items: flex-start;
+    }
+    .heatmap-days-legend {
+      display: flex;
+      flex-direction: column;
+      gap: 3px;
+      font-size: 0.65rem;
+      color: var(--text-muted);
+      font-family: 'JetBrains Mono', monospace;
+      user-select: none;
+      width: 24px;
+    }
+    .heatmap-days-legend span {
+      height: 12px;
+      line-height: 12px;
+    }
+    .heatmap-grid {
+      display: flex;
+      gap: 3px;
+    }
+    .heatmap-week {
+      display: flex;
+      flex-direction: column;
+      gap: 3px;
+    }
+    .heatmap-cell {
+      width: 12px;
+      height: 12px;
+      border-radius: 2px;
+      background: rgba(255, 255, 255, 0.04);
+      border: 1px solid rgba(255, 255, 255, 0.02);
+      cursor: pointer;
+      transition: transform 0.15s ease, outline 0.15s ease;
+      box-sizing: border-box;
+    }
+    .heatmap-cell:hover {
+      transform: scale(1.4);
+      z-index: 10;
+      outline: 2px solid #fff;
+    }
+    .heatmap-cell.is-today {
+      outline: 1.5px solid #34d399;
+    }
+    .heat-lvl-0 { background: rgba(255, 255, 255, 0.04); }
+    .heat-lvl-1 { background: #0369a1; }
+    .heat-lvl-2 { background: #0284c7; }
+    .heat-lvl-3 { background: #38bdf8; box-shadow: 0 0 4px rgba(56, 189, 248, 0.4); }
+    .heat-lvl-4 { background: #7dd3fc; box-shadow: 0 0 8px rgba(125, 211, 252, 0.6); }
+
+    .heatmap-footer {
+      display: flex;
+      justify-content: flex-end;
+      align-items: center;
+      gap: 6px;
+      margin-top: 0.85rem;
+      font-size: 0.72rem;
+      color: var(--text-muted);
+      padding-right: 0.5rem;
+      font-family: 'JetBrains Mono', monospace;
+    }
+    .heatmap-legend-cells {
+      display: flex;
+      gap: 3px;
+    }
+    .heatmap-legend-cells .heatmap-cell {
+      cursor: default;
+    }
+    .heatmap-legend-cells .heatmap-cell:hover {
+      transform: none;
+      outline: none;
+    }
+
     .chart-summary-bar {
       display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 1rem;
       padding-top: 1rem; margin-top: 0.5rem; border-top: 1px solid rgba(255, 255, 255, 0.06); font-size: 0.82rem;
@@ -1171,10 +1547,12 @@ $htmlTemplate = @'
       background: rgba(255, 255, 255, 0.04); color: #64748b; border: 1px solid rgba(255, 255, 255, 0.06);
       display: inline-flex; align-items: center; gap: 0.25rem; line-height: 1.2;
     }
+    .conv-tag-today { border-color: rgba(255, 255, 255, 0.08); color: #64748b; background: rgba(255, 255, 255, 0.03); }
+    .conv-tag-today.active { border-color: rgba(52, 211, 153, 0.45); color: #34d399; background: rgba(52, 211, 153, 0.12); font-weight: 700; box-shadow: 0 0 8px rgba(52, 211, 153, 0.2); }
     .conv-tag-star.active { border-color: rgba(251, 191, 36, 0.35); color: #fbbf24; background: rgba(251, 191, 36, 0.1); }
     .conv-tag-dl.active { border-color: rgba(52, 211, 153, 0.35); color: #34d399; background: rgba(52, 211, 153, 0.1); }
     .conv-tag-dev.active { border-color: rgba(56, 189, 248, 0.35); color: #38bdf8; background: rgba(56, 189, 248, 0.1); }
-    .conv-persona { font-weight: 700; color: #c084fc; border-color: rgba(192, 132, 252, 0.35); background: rgba(192, 132, 252, 0.1); margin-left: auto; }
+    .conv-persona { font-weight: 700; color: #c084fc; border-color: rgba(192, 132, 252, 0.35); background: rgba(192, 132, 252, 0.1); }
 
     .repo-footer { display: flex; justify-content: space-between; align-items: center; margin-top: 0.75rem; font-size: 0.75rem; color: var(--text-muted); }
 
@@ -1274,6 +1652,7 @@ $htmlTemplate = @'
             <button class="view-mode-btn active" id="btn-mode-rolling" onclick="setChartMode('rolling')">14-Day Rolling</button>
             <button class="view-mode-btn" id="btn-mode-cumulative" onclick="setChartMode('cumulative')">&#x1F4C8; Lifetime Cumulative</button>
             <button class="view-mode-btn" id="btn-mode-monthly" onclick="setChartMode('monthly')">Monthly</button>
+            <button class="view-mode-btn" id="btn-mode-heatmap" onclick="setChartMode('heatmap')">&#x1F7E9; Heatmap</button>
           </div>
 
           <select id="chart-repo-select" class="chart-select">
@@ -1288,21 +1667,31 @@ $htmlTemplate = @'
         </div>
       </div>
 
-      <div class="bars-container" id="bars-track"></div>
-      <div class="bars-x-axis" id="bars-axis"></div>
+      <!-- Bar Chart Viewport -->
+      <div class="chart-viewport" id="chart-viewport">
+        <div class="chart-y-axis" id="chart-y-axis"></div>
+        <div class="chart-stage">
+          <div class="chart-grid-lines" id="chart-grid-lines"></div>
+          <div class="bars-container" id="bars-track"></div>
+          <div class="bars-x-axis" id="bars-axis"></div>
+        </div>
+      </div>
+
+      <!-- Heatmap Viewport (hidden by default) -->
+      <div class="heatmap-container" id="heatmap-view" style="display: none;"></div>
 
       <div class="chart-summary-bar">
         <div style="display: flex; gap: 1.5rem; flex-wrap: wrap;">
           <div class="chart-stat-item">
-            <span>Period Total:</span>
+            <span id="chart-sum-total-lbl">Period Total:</span>
             <span class="chart-stat-val" id="chart-sum-total">0</span>
           </div>
           <div class="chart-stat-item">
-            <span>Daily Average:</span>
+            <span id="chart-sum-avg-lbl">Daily Average:</span>
             <span class="chart-stat-val" id="chart-sum-avg">0</span>
           </div>
           <div class="chart-stat-item">
-            <span>Peak Day:</span>
+            <span id="chart-sum-peak-lbl">Peak Day:</span>
             <span class="chart-stat-val" id="chart-sum-peak">-</span>
           </div>
         </div>
@@ -1418,7 +1807,7 @@ $htmlTemplate = @'
 
     <!-- Footer -->
     <footer class="footer">
-      Generated automatically by <strong>GitMyRate</strong> &bull; Last refreshed: __GENERATED_AT__<br>
+      Generated automatically by <strong>GitMyRate v__SCRIPT_VERSION__</strong> &bull; Last refreshed: __GENERATED_AT__<br>
       <span style="opacity: 0.75; font-size: 0.78rem;">Historical snapshots archived in <code>%LOCALAPPDATA%\GitMyRate\stats-history.json</code> (bypassing GitHub's 14-day limit).</span>
     </footer>
   </div>
@@ -1443,6 +1832,8 @@ $htmlTemplate = @'
         r.Stars = r.Stars || 0;
         r.Views14Days = r.Views14Days || 0;
         r.Uniques14Days = r.Uniques14Days || 0;
+        r.ViewsToday = r.ViewsToday || 0;
+        r.UniquesToday = r.UniquesToday || 0;
         r.Clones14Days = r.Clones14Days || 0;
         r.UniqueClones14Days = r.UniqueClones14Days || 0;
         r.Forks = r.Forks || 0;
@@ -1518,21 +1909,47 @@ $htmlTemplate = @'
       const btnRolling = document.getElementById('btn-mode-rolling');
       const btnCum = document.getElementById('btn-mode-cumulative');
       const btnMonthly = document.getElementById('btn-mode-monthly');
+      const btnHeatmap = document.getElementById('btn-mode-heatmap');
+
+      if (btnHeatmap) btnHeatmap.innerText = '\u{1F7E9} Heatmap';
 
       if (chartMetric === 'downloads') {
-        btnRolling.innerText = '\u{1F4E6} By Release Package';
-        btnCum.innerText = '\u{1F4C8} Lifetime Cumulative';
-        btnMonthly.innerText = '\u{1F4C5} Monthly';
+        if (chartRepo === 'combined') {
+          btnRolling.innerText = '\u{1F4E6} By Repository';
+          btnCum.innerText = '\u{1F4C8} Lifetime Cumulative';
+          btnMonthly.innerText = '\u{1F4C5} Monthly';
 
-        if (chartMode === 'rolling') {
-          title.innerText = '\u{1F4E6} Release Package Downloads';
-          sub.innerText = 'Total downloads breakdown per published release package';
-        } else if (chartMode === 'cumulative') {
-          title.innerText = '\u{1F4C8} Lifetime Downloads (Milestone Growth)';
-          sub.innerText = 'Milestone progression tracking all-time downloads as versions were released (counting up)';
-        } else if (chartMode === 'monthly') {
-          title.innerText = '\u{1F4C5} Monthly Package Downloads';
-          sub.innerText = 'Aggregated downloads by release calendar month';
+          if (chartMode === 'rolling') {
+            title.innerText = '\u{1F4E6} Repository Download Totals';
+            sub.innerText = 'Total release package downloads aggregated per repository';
+          } else if (chartMode === 'cumulative') {
+            title.innerText = '\u{1F4C8} Lifetime Downloads (Milestone Growth)';
+            sub.innerText = 'Milestone progression tracking all-time downloads as versions were released (counting up)';
+          } else if (chartMode === 'monthly') {
+            title.innerText = '\u{1F4C5} Monthly Package Downloads';
+            sub.innerText = 'Aggregated downloads grouped by release publication timeline';
+          } else if (chartMode === 'heatmap') {
+            title.innerText = '\u{1F7E9} Package Download Activity Heatmap';
+            sub.innerText = '365-day release package downloads distribution matrix';
+          }
+        } else {
+          btnRolling.innerText = '\u{1F4E6} By Release Package';
+          btnCum.innerText = '\u{1F4C8} Lifetime Cumulative';
+          btnMonthly.innerText = '\u{1F4C5} Monthly';
+
+          if (chartMode === 'rolling') {
+            title.innerText = `\u{1F4E6} ${chartRepo} Release Packages`;
+            sub.innerText = `Downloads breakdown across published versions of ${chartRepo}`;
+          } else if (chartMode === 'cumulative') {
+            title.innerText = `\u{1F4C8} ${chartRepo} Cumulative Milestone Growth`;
+            sub.innerText = `All-time download milestone progression for ${chartRepo}`;
+          } else if (chartMode === 'monthly') {
+            title.innerText = `\u{1F4C5} ${chartRepo} Monthly Releases`;
+            sub.innerText = `Downloads for ${chartRepo} grouped by version release timeline`;
+          } else if (chartMode === 'heatmap') {
+            title.innerText = `\u{1F7E9} ${chartRepo} Download Activity Heatmap`;
+            sub.innerText = `365-day download matrix across version releases of ${chartRepo}`;
+          }
         }
       } else {
         btnRolling.innerText = '14-Day Rolling';
@@ -1549,26 +1966,52 @@ $htmlTemplate = @'
         } else if (chartMode === 'monthly') {
           title.innerText = `Monthly ${metricName}`;
           sub.innerText = 'Calendar month aggregations across all recorded days';
+        } else if (chartMode === 'heatmap') {
+          title.innerText = `\u{1F7E9} ${chartRepo === 'combined' ? 'Combined' : chartRepo} ${metricName} Heatmap`;
+          sub.innerText = '365-day rolling activity matrix — daily visitor volume and traffic intensity';
         }
       }
 
       const note = document.getElementById('chart-repo-note');
-      if (chartRepo === 'combined') {
+      if (chartMode === 'heatmap') {
+        note.innerText = chartRepo === 'combined' ? 'Showing 365-day annual matrix across all projects' : `Filtered specifically to ${chartRepo} annual history`;
+      } else if (chartRepo === 'combined') {
         note.innerText = 'Showing combined metrics across all projects';
       } else {
         note.innerText = `Filtered specifically to ${chartRepo}`;
       }
     }
 
-    function initChartControls() {
+    function populateRepoSelect() {
       const select = document.getElementById('chart-repo-select');
+      const prevVal = chartRepo;
       select.innerHTML = '<option value="combined">&#x1F310; Combined (All Repositories)</option>';
-      repos.forEach(r => {
+      
+      let eligibleRepos = repos.filter(r => !r.IsFork);
+      if (chartMetric === 'downloads') {
+        eligibleRepos = eligibleRepos.filter(r => (r.ReleaseCount && r.ReleaseCount > 0) || (r.Downloads && r.Downloads > 0));
+      } else {
+        eligibleRepos = eligibleRepos.filter(r => (r.Views14Days && r.Views14Days > 0) || (byRepoDaily && byRepoDaily[r.Name]));
+      }
+
+      eligibleRepos.forEach(r => {
         const opt = document.createElement('option');
         opt.value = r.Name;
         opt.innerText = r.Name;
         select.appendChild(opt);
       });
+
+      if (prevVal !== 'combined' && !eligibleRepos.some(r => r.Name === prevVal)) {
+        chartRepo = 'combined';
+        select.value = 'combined';
+      } else {
+        select.value = chartRepo;
+      }
+    }
+
+    function initChartControls() {
+      populateRepoSelect();
+      const select = document.getElementById('chart-repo-select');
       select.addEventListener('change', (e) => {
         chartRepo = e.target.value;
         renderChart();
@@ -1588,51 +2031,108 @@ $htmlTemplate = @'
       document.querySelectorAll('.chart-metric-btn').forEach(b => b.classList.remove('active'));
       const activeBtn = document.getElementById(`btn-chart-${metric}`);
       if (activeBtn) activeBtn.classList.add('active');
+      populateRepoSelect();
       renderChart();
     }
 
     function renderChart() {
       updateChartTitles();
+      const chartViewport = document.getElementById('chart-viewport');
+      const heatmapContainer = document.getElementById('heatmap-view');
+
+      if (chartMode === 'heatmap') {
+        if (chartViewport) chartViewport.style.display = 'none';
+        if (heatmapContainer) heatmapContainer.style.display = 'block';
+        renderHeatmap();
+        return;
+      }
+
+      if (chartViewport) chartViewport.style.display = 'flex';
+      if (heatmapContainer) heatmapContainer.style.display = 'none';
+
+      const totalLbl = document.getElementById('chart-sum-total-lbl');
+      const avgLbl = document.getElementById('chart-sum-avg-lbl');
+      const peakLbl = document.getElementById('chart-sum-peak-lbl');
+      if (totalLbl) totalLbl.innerText = 'Period Total:';
+      if (avgLbl) avgLbl.innerText = 'Daily Average:';
+      if (peakLbl) peakLbl.innerText = 'Peak Day:';
+
       const track = document.getElementById('bars-track');
       const axis = document.getElementById('bars-axis');
+      const yAxis = document.getElementById('chart-y-axis');
+      const gridLines = document.getElementById('chart-grid-lines');
       let dataPoints = [];
 
       if (chartMetric === 'downloads') {
-        let rels = (chartRepo === 'combined')
-          ? allReleases
-          : allReleases.filter(r => r.repo.toLowerCase() === chartRepo.toLowerCase());
+        if (chartRepo === 'combined') {
+          if (chartMode === 'rolling') {
+            const reposWithDls = repos
+              .filter(r => !r.IsFork && ((r.Downloads && r.Downloads > 0) || (r.ReleaseCount && r.ReleaseCount > 0)))
+              .sort((a, b) => (b.Downloads || 0) - (a.Downloads || 0));
 
-        rels = [...rels].sort((a, b) => new Date(a.date) - new Date(b.date));
+            dataPoints = reposWithDls.map(r => ({
+              label: r.Name,
+              value: r.Downloads || 0,
+              tooltip: `${r.Name}: ${r.Downloads || 0} total downloads (${r.ReleaseCount || 0} releases)`
+            }));
+          } else if (chartMode === 'cumulative') {
+            const rels = [...allReleases].sort((a, b) => new Date(a.date) - new Date(b.date));
+            let runningDl = 0;
+            dataPoints = rels.map(r => {
+              runningDl += r.downloads;
+              return {
+                label: r.tag,
+                value: runningDl,
+                tooltip: `${r.repo} ${r.tag}: +${r.downloads} DLs &rarr; ${runningDl} cumulative all-time (${r.date})`
+              };
+            });
+            if (dataPoints.length > 20) dataPoints = dataPoints.slice(-20);
+          } else if (chartMode === 'monthly') {
+            const monthMap = {};
+            allReleases.forEach(r => {
+              const m = r.date.substring(0, 7);
+              monthMap[m] = (monthMap[m] || 0) + r.downloads;
+            });
+            dataPoints = Object.keys(monthMap).sort().map(m => ({
+              label: m,
+              value: monthMap[m],
+              tooltip: `${m}: ${monthMap[m]} downloads across published releases`
+            }));
+          }
+        } else {
+          const rels = allReleases
+            .filter(r => r.repo.toLowerCase() === chartRepo.toLowerCase())
+            .sort((a, b) => new Date(a.date) - new Date(b.date));
 
-        if (chartMode === 'rolling') {
-          const slice = rels.slice(-14);
-          dataPoints = slice.map(r => ({
-            label: r.tag,
-            value: r.downloads,
-            tooltip: `${r.repo} ${r.tag}: ${r.downloads} downloads (${r.date})`
-          }));
-        } else if (chartMode === 'cumulative') {
-          let runningDl = 0;
-          dataPoints = rels.map(r => {
-            runningDl += r.downloads;
-            return {
+          if (chartMode === 'rolling') {
+            dataPoints = rels.map(r => ({
               label: r.tag,
-              value: runningDl,
-              tooltip: `${r.repo} ${r.tag} Milestone: ${runningDl} cumulative downloads (${r.date})`
-            };
-          });
-          if (dataPoints.length > 20) dataPoints = dataPoints.slice(-20);
-        } else if (chartMode === 'monthly') {
-          const monthMap = {};
-          rels.forEach(r => {
-            const m = r.date.substring(0, 7);
-            monthMap[m] = (monthMap[m] || 0) + r.downloads;
-          });
-          dataPoints = Object.keys(monthMap).sort().map(m => ({
-            label: m,
-            value: monthMap[m],
-            tooltip: `${m}: ${monthMap[m]} downloads`
-          }));
+              value: r.downloads,
+              tooltip: `${r.repo} ${r.tag}: ${r.downloads} downloads (${r.date})`
+            }));
+          } else if (chartMode === 'cumulative') {
+            let runningDl = 0;
+            dataPoints = rels.map(r => {
+              runningDl += r.downloads;
+              return {
+                label: r.tag,
+                value: runningDl,
+                tooltip: `${r.repo} ${r.tag} Milestone: ${runningDl} cumulative downloads (${r.date})`
+              };
+            });
+            if (dataPoints.length > 20) dataPoints = dataPoints.slice(-20);
+          } else if (chartMode === 'monthly') {
+            const monthMap = {};
+            rels.forEach(r => {
+              const m = r.date.substring(0, 7);
+              monthMap[m] = (monthMap[m] || 0) + r.downloads;
+            });
+            dataPoints = Object.keys(monthMap).sort().map(m => ({
+              label: m,
+              value: monthMap[m],
+              tooltip: `${m}: ${monthMap[m]} downloads for ${chartRepo}`
+            }));
+          }
         }
       } else {
         if (chartMode === 'rolling') {
@@ -1699,6 +2199,8 @@ $htmlTemplate = @'
       if (dataPoints.length === 0) {
         track.innerHTML = '<div style="margin: auto; color: #94a3b8; font-size: 0.85rem;">No activity data recorded yet for this view.</div>';
         axis.innerHTML = '';
+        if (yAxis) yAxis.innerHTML = '';
+        if (gridLines) gridLines.innerHTML = '';
         document.getElementById('chart-sum-total').innerText = '0';
         document.getElementById('chart-sum-avg').innerText = '0';
         document.getElementById('chart-sum-peak').innerText = '-';
@@ -1714,16 +2216,247 @@ $htmlTemplate = @'
       document.getElementById('chart-sum-avg').innerText = avgVal;
       document.getElementById('chart-sum-peak').innerText = `${peakItem.value} (${peakItem.label})`;
 
-      track.innerHTML = dataPoints.map(d => {
-        const pct = Math.max((d.value / maxVal) * 100, 3);
+      // Calculate nice Y-axis ticks
+      let ticks = [];
+      if (maxVal <= 3) {
+        ticks = [3, 2, 1, 0];
+      } else if (maxVal <= 6) {
+        ticks = [maxVal, Math.ceil(maxVal / 2), 0];
+      } else if (maxVal <= 12) {
+        ticks = [maxVal, Math.round(maxVal / 2), 0];
+      } else {
+        const step = Math.ceil(maxVal / 3);
+        ticks = [maxVal, step * 2, step, 0];
+      }
+
+      if (yAxis) {
+        yAxis.innerHTML = ticks.map(t => `<span>${t >= 1000 ? (t / 1000).toFixed(1) + 'k' : t}</span>`).join('');
+      }
+      if (gridLines) {
+        gridLines.innerHTML = ticks.map(() => '<div class="chart-grid-line"></div>').join('');
+      }
+
+      const isRollingMode = (chartMode === 'rolling' && chartMetric !== 'downloads');
+
+      track.innerHTML = dataPoints.map((d, idx) => {
+        const isToday = isRollingMode && (idx === dataPoints.length - 1);
+        const isZero = (d.value === 0);
+        const pct = isZero ? 0 : Math.max(Math.round((d.value / maxVal) * 100), 8);
+
+        let valLabel = '';
+        if (!isZero) {
+          const liveClass = isToday ? 'today-live' : '';
+          valLabel = `<span class="bar-val ${liveClass}">${d.value}</span>`;
+        } else if (isToday) {
+          valLabel = `<span class="bar-val today-zero" title="0 activity so far today">0</span>`;
+        }
+
+        const todayClass = isToday ? 'is-today' : '';
+        const zeroClass = isZero ? 'is-zero' : '';
+
         return `
-          <div class="bar-col" title="${d.tooltip}">
+          <div class="bar-col ${todayClass} ${zeroClass}" title="${d.tooltip}">
+            ${valLabel}
             <div class="bar-fill" style="height: ${pct}%;"></div>
+            ${isZero ? '<div class="zero-baseline-dot"></div>' : ''}
           </div>
         `;
       }).join('');
 
-      axis.innerHTML = dataPoints.map(d => `<span class="x-label">${d.label}</span>`).join('');
+      axis.innerHTML = dataPoints.map((d, idx) => {
+        const isToday = isRollingMode && (idx === dataPoints.length - 1);
+        if (isToday) {
+          return `<span class="x-label is-today">${d.label}<span class="today-badge">TODAY</span></span>`;
+        }
+        return `<span class="x-label">${d.label}</span>`;
+      }).join('');
+    }
+
+    /* ------------------- 365-DAY ACTIVITY HEATMAP ------------------- */
+    function renderHeatmap() {
+      const heatmapContainer = document.getElementById('heatmap-view');
+      if (!heatmapContainer) return;
+
+      const activityMap = {};
+      if (chartMetric === 'downloads') {
+        if (chartRepo === 'combined') {
+          cumulativeYearData.forEach(d => {
+            activityMap[d.date] = (activityMap[d.date] || 0) + (d.dayDownloads || 0);
+          });
+        } else {
+          allReleases
+            .filter(r => r.repo.toLowerCase() === chartRepo.toLowerCase())
+            .forEach(r => {
+              activityMap[r.date] = (activityMap[r.date] || 0) + (r.downloads || 0);
+            });
+        }
+      } else {
+        if (chartRepo === 'combined') {
+          cumulativeYearData.forEach(d => {
+            const val = chartMetric === 'views' ? (d.dayViews || 0) : (d.dayUniques || 0);
+            activityMap[d.date] = val;
+          });
+        } else {
+          const repoData = byRepoDaily[chartRepo] || {};
+          Object.keys(repoData).forEach(dt => {
+            const val = chartMetric === 'views' ? (repoData[dt].views || 0) : (repoData[dt].uniques || 0);
+            activityMap[dt] = val;
+          });
+        }
+      }
+
+      const today = new Date();
+      const pad = n => String(n).padStart(2, '0');
+      const todayObj = new Date(today.getFullYear(), today.getMonth(), today.getDate());
+      const todayStr = `${todayObj.getFullYear()}-${pad(todayObj.getMonth() + 1)}-${pad(todayObj.getDate())}`;
+
+      const todayDayOfWeek = todayObj.getDay(); // 0 is Sunday
+      const startDate = new Date(todayObj.getFullYear(), todayObj.getMonth(), todayObj.getDate() - todayDayOfWeek - (52 * 7));
+
+      const weeks = [];
+      let curWeek = [];
+      let curDate = new Date(startDate);
+
+      let totalActivity = 0;
+      let activeDaysCount = 0;
+      let peakVal = 0;
+      let peakDate = '-';
+
+      while (curDate <= todayObj || curDate.getDay() !== 0) {
+        if (curDate.getDay() === 0 && curWeek.length > 0) {
+          weeks.push(curWeek);
+          curWeek = [];
+        }
+
+        const dStr = `${curDate.getFullYear()}-${pad(curDate.getMonth() + 1)}-${pad(curDate.getDate())}`;
+        const isFuture = curDate > todayObj;
+        const val = isFuture ? 0 : (activityMap[dStr] || 0);
+
+        if (!isFuture) {
+          totalActivity += val;
+          if (val > 0) activeDaysCount++;
+          if (val > peakVal) {
+            peakVal = val;
+            peakDate = dStr;
+          }
+        }
+
+        curWeek.push({
+          date: dStr,
+          val: val,
+          isToday: (dStr === todayStr),
+          isFuture: isFuture,
+          dayOfWeek: curDate.getDay()
+        });
+
+        curDate.setDate(curDate.getDate() + 1);
+      }
+      if (curWeek.length > 0) {
+        weeks.push(curWeek);
+      }
+
+      const totalLbl = document.getElementById('chart-sum-total-lbl');
+      const avgLbl = document.getElementById('chart-sum-avg-lbl');
+      const peakLbl = document.getElementById('chart-sum-peak-lbl');
+      if (totalLbl) totalLbl.innerText = 'Annual Total:';
+      if (avgLbl) avgLbl.innerText = 'Active Days:';
+      if (peakLbl) peakLbl.innerText = 'Busiest Day:';
+
+      const metricNoun = chartMetric === 'downloads' ? 'DLs' : (chartMetric === 'views' ? 'Views' : 'Visitors');
+      document.getElementById('chart-sum-total').innerText = totalActivity.toLocaleString();
+      document.getElementById('chart-sum-avg').innerText = `${activeDaysCount} days`;
+      document.getElementById('chart-sum-peak').innerText = peakVal > 0 ? `${peakVal} ${metricNoun} (${peakDate})` : '-';
+
+      function getHeatClass(v) {
+        if (v <= 0) return 'heat-lvl-0';
+        if (peakVal <= 4) {
+          if (v === 1) return 'heat-lvl-1';
+          if (v === 2) return 'heat-lvl-2';
+          if (v === 3) return 'heat-lvl-3';
+          return 'heat-lvl-4';
+        }
+        const q1 = Math.max(1, Math.round(peakVal * 0.2));
+        const q2 = Math.max(2, Math.round(peakVal * 0.45));
+        const q3 = Math.max(3, Math.round(peakVal * 0.75));
+        if (v <= q1) return 'heat-lvl-1';
+        if (v <= q2) return 'heat-lvl-2';
+        if (v <= q3) return 'heat-lvl-3';
+        return 'heat-lvl-4';
+      }
+
+      const monthLabels = [];
+      let lastMonth = -1;
+      let lastWeekIdx = -5;
+
+      weeks.forEach((w, wIdx) => {
+        const firstDayOfMonth = w.find(d => !d.isFuture && new Date(d.date + 'T00:00:00').getDate() <= 7);
+        if (firstDayOfMonth) {
+          const dt = new Date(firstDayOfMonth.date + 'T00:00:00');
+          const mIdx = dt.getMonth();
+          if (mIdx !== lastMonth && (wIdx - lastWeekIdx) >= 3) {
+            monthLabels.push({
+              weekIdx: wIdx,
+              monthName: dt.toLocaleDateString('en-US', { month: 'short' })
+            });
+            lastMonth = mIdx;
+            lastWeekIdx = wIdx;
+          }
+        }
+      });
+
+      let monthsHtml = `<div style="position: relative; height: 16px; margin-bottom: 6px; margin-left: 32px; width: ${weeks.length * 15}px;">`;
+      monthLabels.forEach(m => {
+        const leftPx = m.weekIdx * 15;
+        monthsHtml += `<span style="position: absolute; left: ${leftPx}px; font-size: 0.68rem; color: #94a3b8; font-family: 'JetBrains Mono', monospace;">${m.monthName}</span>`;
+      });
+      monthsHtml += `</div>`;
+
+      let gridHtml = '';
+      weeks.forEach(w => {
+        gridHtml += '<div class="heatmap-week">';
+        w.forEach(d => {
+          if (d.isFuture) {
+            gridHtml += '<div class="heatmap-cell" style="visibility: hidden;"></div>';
+          } else {
+            const lvlClass = getHeatClass(d.val);
+            const todayClass = d.isToday ? 'is-today' : '';
+            const title = `${d.date}: ${d.val} ${metricNoun}${d.isToday ? ' (Today)' : ''}`;
+            gridHtml += `<div class="heatmap-cell ${lvlClass} ${todayClass}" title="${title}"></div>`;
+          }
+        });
+        gridHtml += '</div>';
+      });
+
+      heatmapContainer.innerHTML = `
+        <div class="heatmap-wrap">
+          ${monthsHtml}
+          <div class="heatmap-body">
+            <div class="heatmap-days-legend">
+              <span></span>
+              <span>Mon</span>
+              <span></span>
+              <span>Wed</span>
+              <span></span>
+              <span>Fri</span>
+              <span></span>
+            </div>
+            <div class="heatmap-grid">
+              ${gridHtml}
+            </div>
+          </div>
+          <div class="heatmap-footer">
+            <span>Less</span>
+            <div class="heatmap-legend-cells">
+              <div class="heatmap-cell heat-lvl-0" title="0 activity"></div>
+              <div class="heatmap-cell heat-lvl-1" title="Low activity"></div>
+              <div class="heatmap-cell heat-lvl-2" title="Medium activity"></div>
+              <div class="heatmap-cell heat-lvl-3" title="High activity"></div>
+              <div class="heatmap-cell heat-lvl-4" title="Peak activity"></div>
+            </div>
+            <span>More</span>
+          </div>
+        </div>
+      `;
     }
 
     /* ------------------- REPO HEALTH & CONVERSIONS LOGIC ------------------- */
@@ -1814,6 +2547,7 @@ $htmlTemplate = @'
 
     function calculateRepoConversions(r) {
       const rawViews = r.Views14Days || 0;
+      const allTimeViews = r.AllTimeViews || rawViews;
       const uniqueClones = r.UniqueClones14Days || 0;
       const totalClones = r.Clones14Days || 0;
       
@@ -1821,12 +2555,34 @@ $htmlTemplate = @'
       const botPercent = totalClones > 0 ? Math.round((botPulls / totalClones) * 100) : 0;
       const cloneRepeat = uniqueClones > 0 ? (totalClones / uniqueClones).toFixed(1) : 1;
 
-      // Only calculate visitor conversion if repo has recorded views in the 14d window
+      // 14-day human cloners conversion
       const cloneRateNum = rawViews > 0 ? Math.min(100, (uniqueClones / rawViews) * 100) : 0;
-      const starRateNum = rawViews > 0 ? Math.min(100, (r.Stars / rawViews) * 100) : 0;
+
+      // Ground star & download conversions in lifetime visitors
+      const baseVisitors = Math.max(allTimeViews, rawViews, 0);
+      const starRateNum = baseVisitors > 0 ? Math.min(100, (r.Stars / baseVisitors) * 100) : (r.Stars > 0 ? 100 : 0);
       const starRate = starRateNum.toFixed(1);
-      const dlMultiplier = rawViews > 0 ? (r.Downloads / rawViews).toFixed(1) : '0.0';
-      const dlRateNum = rawViews > 0 ? Math.min(100, (r.Downloads / Math.max(rawViews, r.Downloads)) * 100) : 0;
+      const dlMultiplier = baseVisitors > 0 ? (r.Downloads / baseVisitors).toFixed(1) : (r.Downloads > 0 ? '1.0' : '0.0');
+      const dlRateNum = baseVisitors > 0 ? Math.min(100, (r.Downloads / Math.max(baseVisitors, r.Downloads)) * 100) : (r.Downloads > 0 ? 100 : 0);
+
+      // Today's traffic pulse
+      let todayViews = r.ViewsToday || 0;
+      let todayUniques = r.UniquesToday || 0;
+
+      if (!todayViews && byRepoDaily && byRepoDaily[r.Name]) {
+        const now = new Date();
+        const pad = n => String(n).padStart(2, '0');
+        const localToday = `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())}`;
+        const utcToday = now.toISOString().split('T')[0];
+        const rDaily = byRepoDaily[r.Name];
+        if (rDaily[localToday]) {
+          todayViews = rDaily[localToday].views || 0;
+          todayUniques = rDaily[localToday].uniques || 0;
+        } else if (rDaily[utcToday]) {
+          todayViews = rDaily[utcToday].views || 0;
+          todayUniques = rDaily[utcToday].uniques || 0;
+        }
+      }
 
       let persona = 'Hybrid Dev/App';
       let personaIcon = '&#x2696;&#xFE0F;';
@@ -1846,6 +2602,8 @@ $htmlTemplate = @'
 
       return {
         rawViews,
+        allTimeViews,
+        baseVisitors,
         dlRate: dlRateNum.toFixed(1),
         dlMultiplier,
         starRate,
@@ -1859,7 +2617,9 @@ $htmlTemplate = @'
         botPercent,
         cloneRepeat,
         persona,
-        personaIcon
+        personaIcon,
+        todayViews,
+        todayUniques
       };
     }
 
@@ -2055,6 +2815,7 @@ $htmlTemplate = @'
         const healthTooltip = `${r.Name} Repository Health: ${h.score}/100 (${h.status})&#10;&bull; Last push: ${h.daysSincePush <= 14 ? 'Recent (<=14d)' : h.daysSincePush + 'd ago'}&#10;&bull; Hygiene: ${b1}&#10;&bull; Traction: ${b2}&#10;&bull; Backlog: ${b3}`;
 
         const conv = calculateRepoConversions(r);
+        const allTimeViewsVal = r.AllTimeViews || r.Views14Days || 0;
 
         return `
           <div class="repo-card">
@@ -2095,9 +2856,9 @@ $htmlTemplate = @'
                   <span class="metric-val" style="color: #34d399;">&#x1F4E5; ${r.Downloads}</span>
                   <span class="metric-lbl">Downloads</span>
                 </div>
-                <div class="metric-item" title="14-day page views (${r.Uniques14Days} unique visitors)">
-                  <span class="metric-val" style="color: #38bdf8;">&#x1F441;&#xFE0F; ${r.Views14Days}</span>
-                  <span class="metric-lbl">14d Views</span>
+                <div class="metric-item" title="14-day page views: ${r.Views14Days} (${r.Uniques14Days} unique visitors) &bull; Lifetime archived views: ${allTimeViewsVal}">
+                  <span class="metric-val" style="color: #38bdf8;">&#x1F441;&#xFE0F; ${r.Views14Days} <span style="font-size: 0.72rem; font-weight: 500; color: #94a3b8;" title="Lifetime archived views">(${allTimeViewsVal})</span></span>
+                  <span class="metric-lbl">Views (14d/All)</span>
                 </div>
                 <div class="metric-item">
                   <span class="metric-val" style="color: #c084fc;">&#x1F500; ${r.Forks}</span>
@@ -2110,8 +2871,9 @@ $htmlTemplate = @'
               </div>
 
               <div class="repo-conv-bar">
-                <span class="conv-tag conv-tag-star ${conv.starRateNum > 0 ? 'active' : ''}" title="${conv.rawViews > 0 ? `Star Conversion: ${conv.starRate}% of visitors starred this repo` : 'No 14-day views recorded yet'}">&#x2B50; ${conv.rawViews > 0 ? `${conv.starRate}%` : '0.0%'} Star Conv</span>
-                <span class="conv-tag conv-tag-dl ${conv.dlRateNum > 0 ? 'active' : ''}" title="${conv.rawViews > 0 ? `Release Downloads: ${r.Downloads} packages (${conv.dlMultiplier}x per visitor)` : `Release Downloads: ${r.Downloads} packages total`}">&#x1F4E5; ${r.Downloads} DLs (${conv.dlMultiplier}x)</span>
+                <span class="conv-tag conv-tag-today ${conv.todayUniques > 0 ? 'active' : ''}" title="${conv.todayUniques > 0 ? `${conv.todayUniques} unique visitor${conv.todayUniques === 1 ? '' : 's'} (${conv.todayViews} page view${conv.todayViews === 1 ? '' : 's'}) recorded on GitHub today` : 'No visitors recorded yet on GitHub today'}">${conv.todayUniques > 0 ? '&#x1F7E2;' : '&#x26AA;'} ${conv.todayUniques} visitor${conv.todayUniques === 1 ? '' : 's'} today</span>
+                <span class="conv-tag conv-tag-star ${conv.starRateNum > 0 ? 'active' : ''}" title="${conv.baseVisitors > 0 ? `Star Conversion: ${conv.starRate}% of recorded visitors starred this repo (${r.Stars} stars &divide; ${conv.baseVisitors} visitors)` : 'No views recorded yet'}">&#x2B50; ${conv.starRate}% Star Conv</span>
+                <span class="conv-tag conv-tag-dl ${conv.dlRateNum > 0 ? 'active' : ''}" title="${conv.baseVisitors > 0 ? `Release Downloads: ${r.Downloads} packages (${conv.dlMultiplier}x per visitor &bull; ${r.Downloads} &divide; ${conv.baseVisitors})` : `Release Downloads: ${r.Downloads} packages total`}">&#x1F4E5; ${r.Downloads} DLs (${conv.dlMultiplier}x)</span>
                 <span class="conv-tag conv-tag-dev ${conv.uniqueClones > 0 ? 'active' : ''}" title="Devs: ${conv.uniqueClones} unique client IPs or user accounts that cloned this repo in the last 14 days (${conv.totalClones} total git pulls &bull; +${conv.botPulls} repeat/CI pulls)">&#x1F680; ${conv.uniqueClones} Devs <span style="opacity:0.65;font-size:0.62rem;">(+${conv.botPulls} &#x1F916;)</span></span>
                 <span class="conv-tag conv-persona" title="Audience Classification">${conv.personaIcon} ${conv.persona}</span>
               </div>
@@ -2164,6 +2926,7 @@ $htmlTemplate = @'
 
 # Replace tokens in template
 $htmlContent = $htmlTemplate `
+  -replace '__SCRIPT_VERSION__', $ScriptVersion `
   -replace '__USER_AVATAR__', $avatarDataUri `
   -replace '__USER_LOGIN__', $user.login `
   -replace '__USER_BIO__', [System.Web.HttpUtility]::HtmlEncode($bio) `
