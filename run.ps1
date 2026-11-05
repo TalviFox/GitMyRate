@@ -40,7 +40,7 @@ $avatarIco = Join-Path -Path $appDataDir -ChildPath "avatar.ico"
 $launcherPs1 = Join-Path -Path $appDataDir -ChildPath "launcher.ps1"
 $migratedMarker = Join-Path -Path $appDataDir -ChildPath ".migrated"
 
-$ScriptVersion = "1.1.0"
+$ScriptVersion = "1.2.0"
 
 Write-Host ""
 Write-Host "   ======================================================" -ForegroundColor Cyan
@@ -477,7 +477,7 @@ foreach ($repo in $repos) {
 
       if ($viewsData.views) {
         foreach ($v in $viewsData.views) {
-          $dayKey = ([DateTime]::Parse($v.timestamp)).ToString("yyyy-MM-dd")
+          $dayKey = if ($v.timestamp.Length -ge 10) { $v.timestamp.Substring(0, 10) } else { ([DateTime]::Parse($v.timestamp)).ToUniversalTime().ToString("yyyy-MM-dd") }
           $vCount = [int]$v.count
           $vUniq = [int]$v.uniques
 
@@ -518,7 +518,7 @@ foreach ($repo in $repos) {
 
       if ($clonesData.clones) {
         foreach ($c in $clonesData.clones) {
-          $dayKey = ([DateTime]::Parse($c.timestamp)).ToString("yyyy-MM-dd")
+          $dayKey = if ($c.timestamp.Length -ge 10) { $c.timestamp.Substring(0, 10) } else { ([DateTime]::Parse($c.timestamp)).ToUniversalTime().ToString("yyyy-MM-dd") }
           $cCount = [int]$c.count
           if (-not $archive.ContainsKey($dayKey)) {
             $archive[$dayKey] = [PSCustomObject]@{
@@ -830,7 +830,6 @@ $historyCompressed = if ($historyList.Count -eq 1) { "[ " + ($historyList[0] | C
 # Handle Avatar & Desktop Shortcut
 $avatarUrl = $user.avatar_url
 $avatarDataUri = $avatarUrl
-$hasCustomIcon = $false
 
 try {
   $wc = New-Object System.Net.WebClient
@@ -942,15 +941,10 @@ try {
     Get-ChildItem -Path $appDataDir -Filter "avatar-*.ico" -ErrorAction SilentlyContinue | Remove-Item -Force -ErrorAction SilentlyContinue
     $avatarIco = Join-Path -Path $appDataDir -ChildPath "avatar-$icoHash.ico"
     [System.IO.File]::WriteAllBytes($avatarIco, $icoBytes)
-    $hasCustomIcon = $true
   }
-  catch {
-    $hasCustomIcon = $false
-  }
+  catch {}
 }
-catch {
-  $hasCustomIcon = $false
-}
+catch {}
 
 # Create / Update Desktop Shortcut & Offline Launcher
 $desktopPath = [Environment]::GetFolderPath("Desktop")
@@ -962,38 +956,46 @@ try {
         irm https://raw.githubusercontent.com/TalviFox/GitMyRate/main/run.ps1 | iex
         return
     }
-} catch {}
+} catch {
+    Write-Host "  [-] Live sync encountered an error: `$_" -ForegroundColor Yellow
+}
 
 `$report = "$reportFile"
 if (Test-Path `$report) {
+    Write-Host "  [*] Opening offline cached dashboard..." -ForegroundColor Cyan
     Start-Process -FilePath `$report
+} else {
+    Write-Host "  [-] No cached dashboard found at `$report" -ForegroundColor Red
 }
 "@
 Set-Content -Path $launcherPs1 -Value $launcherContent -Encoding UTF8
 
-if ($CreateShortcut -or (-not (Test-Path $shortcutFile)) -or ($hasCustomIcon -and (Test-Path $avatarIco))) {
-  try {
-    if (Test-Path $shortcutFile) {
-      Remove-Item $shortcutFile -Force -ErrorAction SilentlyContinue
-    }
-    $wsh = New-Object -ComObject WScript.Shell
-    $sc = $wsh.CreateShortcut($shortcutFile)
-    $sc.TargetPath = "powershell.exe"
-    $sc.Arguments = "-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File `"$launcherPs1`""
-    $sc.Description = "GitMyRate - GitHub Audience & Conversion Rates Dashboard"
-    $sc.WorkingDirectory = $appDataDir
-    if ($hasCustomIcon -and (Test-Path $avatarIco)) {
-      $sc.IconLocation = "$avatarIco,0"
-    }
-    else {
-      $sc.IconLocation = "$env:SystemRoot\System32\shell32.dll,22"
-    }
-    $sc.Save()
-    Start-Process -FilePath "$env:SystemRoot\System32\ie4uinit.exe" -ArgumentList "-show" -WindowStyle Hidden -Wait -ErrorAction SilentlyContinue
-    Write-Host "  [+] Desktop Shortcut saved: 'GitMyRate ($Username).lnk'" -ForegroundColor Green
+try {
+  if (Test-Path $shortcutFile) {
+    Remove-Item $shortcutFile -Force -ErrorAction SilentlyContinue
   }
-  catch {}
+  $wsh = New-Object -ComObject WScript.Shell
+  $sc = $wsh.CreateShortcut($shortcutFile)
+  $sc.TargetPath = "powershell.exe"
+  $sc.Arguments = "-NoExit -ExecutionPolicy Bypass -File `"$launcherPs1`""
+  $sc.Description = "GitMyRate - GitHub Audience & Conversion Rates Dashboard"
+  $sc.WorkingDirectory = $appDataDir
+  $targetIcon = if (Test-Path $avatarIco) {
+    $avatarIco
+  } else {
+    $existingIcon = Get-ChildItem -Path $appDataDir -Filter "avatar-*.ico" -ErrorAction SilentlyContinue | Select-Object -First 1
+    if ($existingIcon) { $existingIcon.FullName } else { $null }
+  }
+  if ($targetIcon) {
+    $sc.IconLocation = "$targetIcon,0"
+  } else {
+    $sc.IconLocation = "$env:SystemRoot\System32\shell32.dll,22"
+  }
+  $sc.Save()
+  Start-Process -FilePath "$env:SystemRoot\System32\ie4uinit.exe" -ArgumentList "-show" -WindowStyle Hidden -Wait -ErrorAction SilentlyContinue
+  Write-Host "  [+] Desktop Shortcut saved: 'GitMyRate ($Username).lnk'" -ForegroundColor Green
 }
+catch {}
 
 Write-Host "  [4/4] Rendering GitMyRate HTML Dashboard..." -ForegroundColor Cyan
 
@@ -1180,15 +1182,39 @@ $htmlTemplate = @'
     .funnel-card-formula { font-size: 0.72rem; color: #64748b; margin-top: 0.25rem; }
     .funnel-card-desc { font-size: 0.78rem; color: #cbd5e1; margin-top: 0.6rem; line-height: 1.35; }
     .funnel-flow {
-      display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 0.5rem;
-      padding: 1rem 1.25rem; background: rgba(15, 23, 42, 0.45); border: 1px solid rgba(255, 255, 255, 0.05);
+      display: grid;
+      grid-template-columns: repeat(5, 1fr);
+      gap: 0.45rem;
+      align-items: center;
+      padding: 0.75rem 0.85rem;
+      background: rgba(15, 23, 42, 0.45);
+      border: 1px solid rgba(255, 255, 255, 0.05);
       border-radius: 12px;
+      width: 100%;
+      box-sizing: border-box;
     }
     .stage-pill {
-      display: flex; align-items: center; gap: 0.4rem; padding: 0.4rem 0.85rem; border-radius: 8px;
-      font-size: 0.84rem; font-weight: 600; background: rgba(255, 255, 255, 0.03);
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      gap: 0.3rem;
+      padding: 0.45rem 0.3rem;
+      border-radius: 8px;
+      font-size: 0.76rem;
+      font-weight: 600;
+      background: rgba(255, 255, 255, 0.03);
+      white-space: nowrap;
+      transition: transform 0.15s ease;
+      box-sizing: border-box;
+      width: 100%;
+      text-align: center;
     }
-    .funnel-arrow { color: #475569; font-weight: 700; font-size: 1.1rem; }
+    .stage-pill:hover { transform: translateY(-1px); }
+    .stage-pill.pill-visitors { border: 1px solid rgba(56, 189, 248, 0.3); color: #bae6fd; }
+    .stage-pill.pill-devs { border: 1px solid rgba(56, 189, 248, 0.3); color: #38bdf8; }
+    .stage-pill.pill-downloads { border: 1px solid rgba(52, 211, 153, 0.3); color: #34d399; }
+    .stage-pill.pill-stars { border: 1px solid rgba(251, 191, 36, 0.3); color: #fbbf24; }
+    .stage-pill.pill-bots { border: 1px solid rgba(248, 113, 113, 0.3); color: #f87171; }
 
     /* Interactive Chart */
     .chart-section {
@@ -1396,8 +1422,11 @@ $htmlTemplate = @'
       width: 24px;
     }
     .heatmap-days-legend span {
+      display: flex;
+      align-items: center;
       height: 12px;
       line-height: 12px;
+      box-sizing: border-box;
     }
     .heatmap-grid {
       display: flex;
@@ -1557,6 +1586,57 @@ $htmlTemplate = @'
     .repo-footer { display: flex; justify-content: space-between; align-items: center; margin-top: 0.75rem; font-size: 0.75rem; color: var(--text-muted); }
 
     .footer { text-align: center; color: var(--text-muted); font-size: 0.8rem; margin-top: 4rem; line-height: 1.6; }
+
+    /* Responsive Layout for Half-Screen / Compact Displays */
+    @media (max-width: 960px) {
+      .funnel-arrow {
+        display: none !important;
+      }
+      .profile-banner, .funnel-section, .chart-section {
+        padding: 1.25rem 1.25rem;
+      }
+      .chart-header {
+        flex-direction: column;
+        align-items: flex-start;
+        gap: 0.75rem;
+      }
+      .chart-controls {
+        width: 100%;
+        justify-content: flex-start;
+      }
+    }
+
+    @media (max-width: 768px) {
+      .funnel-flow {
+        grid-template-columns: 1fr;
+        gap: 0.5rem;
+      }
+    }
+
+    @media (max-width: 600px) {
+      .container {
+        padding: 1rem 0.75rem;
+      }
+      .profile-banner {
+        flex-direction: column;
+        align-items: flex-start;
+        gap: 1rem;
+      }
+      .kpi-grid {
+        grid-template-columns: 1fr 1fr;
+      }
+      .funnel-grid {
+        grid-template-columns: 1fr;
+      }
+      .view-mode-group {
+        flex-wrap: wrap;
+        width: 100%;
+      }
+      .view-mode-btn {
+        flex: 1 1 auto;
+        text-align: center;
+      }
+    }
   </style>
 </head>
 <body>
@@ -1573,7 +1653,7 @@ $htmlTemplate = @'
         </div>
       </div>
       <div style="display: flex; gap: 0.75rem; align-items: center;">
-        <span class="brand-badge">&#x26A1; GitMyRate Vitals</span>
+        <span class="brand-badge">&#x26A1; GitMyRate v__SCRIPT_VERSION__</span>
         <button class="btn" onclick="toggleHistory()">&#x1F4DC; History Log</button>
       </div>
     </header>
@@ -1930,7 +2010,7 @@ $htmlTemplate = @'
             sub.innerText = 'Aggregated downloads grouped by release publication timeline';
           } else if (chartMode === 'heatmap') {
             title.innerText = '\u{1F7E9} Package Download Activity Heatmap';
-            sub.innerText = '365-day release package downloads distribution matrix';
+            sub.innerText = '365-day package downloads (daily deltas tracked + release baselines)';
           }
         } else {
           btnRolling.innerText = '\u{1F4E6} By Release Package';
@@ -1948,7 +2028,7 @@ $htmlTemplate = @'
             sub.innerText = `Downloads for ${chartRepo} grouped by version release timeline`;
           } else if (chartMode === 'heatmap') {
             title.innerText = `\u{1F7E9} ${chartRepo} Download Activity Heatmap`;
-            sub.innerText = `365-day download matrix across version releases of ${chartRepo}`;
+            sub.innerText = `365-day download activity for ${chartRepo} (daily deltas tracked + release baselines)`;
           }
         }
       } else {
@@ -1974,7 +2054,11 @@ $htmlTemplate = @'
 
       const note = document.getElementById('chart-repo-note');
       if (chartMode === 'heatmap') {
-        note.innerText = chartRepo === 'combined' ? 'Showing 365-day annual matrix across all projects' : `Filtered specifically to ${chartRepo} annual history`;
+        const scope = chartRepo === 'combined' ? 'Showing 365-day annual matrix across all projects' : `Filtered specifically to ${chartRepo} annual history`;
+        const noteDetail = chartMetric === 'downloads'
+          ? ' \u2022 Tracks daily download activity & release milestone deltas'
+          : ' \u2022 Rolling 365-day archive (bypasses GitHub\'s 14-day limit)';
+        note.innerText = scope + noteDetail;
       } else if (chartRepo === 'combined') {
         note.innerText = 'Showing combined metrics across all projects';
       } else {
@@ -2035,6 +2119,33 @@ $htmlTemplate = @'
       renderChart();
     }
 
+    function getByRepoDaily(repoName) {
+      if (!byRepoDaily || !repoName) return null;
+      if (byRepoDaily[repoName]) return byRepoDaily[repoName];
+      const lower = repoName.toLowerCase();
+      for (const k in byRepoDaily) {
+        if (k.toLowerCase() === lower) return byRepoDaily[k];
+      }
+      return null;
+    }
+
+    function getRepoDayVal(d, repoName, metric) {
+      if (!d || !repoName) return 0;
+      const map = metric === 'views' ? d.byRepoDayViews : d.byRepoDayUniques;
+      if (map) {
+        if (map[repoName] !== undefined) return map[repoName] || 0;
+        const lower = repoName.toLowerCase();
+        for (const k in map) {
+          if (k.toLowerCase() === lower) return map[k] || 0;
+        }
+      }
+      const daily = getByRepoDaily(repoName);
+      if (daily && daily[d.date]) {
+        return (metric === 'views' ? daily[d.date].views : daily[d.date].uniques) || 0;
+      }
+      return 0;
+    }
+
     function renderChart() {
       updateChartTitles();
       const chartViewport = document.getElementById('chart-viewport');
@@ -2053,9 +2164,9 @@ $htmlTemplate = @'
       const totalLbl = document.getElementById('chart-sum-total-lbl');
       const avgLbl = document.getElementById('chart-sum-avg-lbl');
       const peakLbl = document.getElementById('chart-sum-peak-lbl');
-      if (totalLbl) totalLbl.innerText = 'Period Total:';
-      if (avgLbl) avgLbl.innerText = 'Daily Average:';
-      if (peakLbl) peakLbl.innerText = 'Peak Day:';
+      if (totalLbl) totalLbl.innerText = chartMode === 'monthly' ? 'Period Total:' : (chartMode === 'cumulative' ? 'Cumulative Total:' : 'Period Total:');
+      if (avgLbl) avgLbl.innerText = chartMode === 'monthly' ? 'Monthly Average:' : (chartMode === 'rolling' ? 'Daily Average:' : 'Average:');
+      if (peakLbl) peakLbl.innerText = chartMode === 'monthly' ? 'Peak Month:' : (chartMode === 'rolling' ? 'Peak Day:' : 'Peak:');
 
       const track = document.getElementById('bars-track');
       const axis = document.getElementById('bars-axis');
@@ -2141,8 +2252,10 @@ $htmlTemplate = @'
             if (chartRepo === 'combined') {
               val = chartMetric === 'views' ? d.views : d.uniques;
             } else {
-              const repoDay = byRepoDaily[chartRepo] && byRepoDaily[chartRepo][d.date];
-              if (repoDay) val = chartMetric === 'views' ? repoDay.views : repoDay.uniques;
+              const repoDaily = getByRepoDaily(chartRepo);
+              if (repoDaily && repoDaily[d.date]) {
+                val = chartMetric === 'views' ? (repoDaily[d.date].views || 0) : (repoDaily[d.date].uniques || 0);
+              }
             }
             const dt = new Date(d.date + 'T00:00:00');
             const lbl = dt.toLocaleDateString('en-US', { month: 'numeric', day: 'numeric' });
@@ -2159,8 +2272,7 @@ $htmlTemplate = @'
             if (chartRepo === 'combined') {
               dayVal = chartMetric === 'views' ? d.dayViews : d.dayUniques;
             } else {
-              const repoDay = byRepoDaily[chartRepo] && byRepoDaily[chartRepo][d.date];
-              if (repoDay) dayVal = chartMetric === 'views' ? repoDay.views : repoDay.uniques;
+              dayVal = getRepoDayVal(d, chartRepo, chartMetric);
             }
             running += dayVal;
             const dt = new Date(d.date + 'T00:00:00');
@@ -2183,11 +2295,20 @@ $htmlTemplate = @'
             if (chartRepo === 'combined') {
               dayVal = chartMetric === 'views' ? d.dayViews : d.dayUniques;
             } else {
-              const repoDay = byRepoDaily[chartRepo] && byRepoDaily[chartRepo][d.date];
-              if (repoDay) dayVal = chartMetric === 'views' ? repoDay.views : repoDay.uniques;
+              dayVal = getRepoDayVal(d, chartRepo, chartMetric);
             }
             monthMap[m] = (monthMap[m] || 0) + dayVal;
           });
+          if (chartRepo !== 'combined') {
+            const rDaily = getByRepoDaily(chartRepo) || {};
+            Object.keys(rDaily).forEach(dt => {
+              const m = dt.substring(0, 7);
+              if (!cumulativeYearData.some(c => c.date === dt)) {
+                const val = chartMetric === 'views' ? (rDaily[dt].views || 0) : (rDaily[dt].uniques || 0);
+                monthMap[m] = (monthMap[m] || 0) + val;
+              }
+            });
+          }
           dataPoints = Object.keys(monthMap).sort().map(m => ({
             label: m,
             value: monthMap[m],
@@ -2229,6 +2350,8 @@ $htmlTemplate = @'
         ticks = [maxVal, step * 2, step, 0];
       }
 
+      const scaleMax = (ticks && ticks.length > 0 && ticks[0] > 0) ? ticks[0] : maxVal;
+
       if (yAxis) {
         yAxis.innerHTML = ticks.map(t => `<span>${t >= 1000 ? (t / 1000).toFixed(1) + 'k' : t}</span>`).join('');
       }
@@ -2241,7 +2364,7 @@ $htmlTemplate = @'
       track.innerHTML = dataPoints.map((d, idx) => {
         const isToday = isRollingMode && (idx === dataPoints.length - 1);
         const isZero = (d.value === 0);
-        const pct = isZero ? 0 : Math.max(Math.round((d.value / maxVal) * 100), 8);
+        const pct = isZero ? 0 : Math.max(Math.round((d.value / scaleMax) * 100), 6);
 
         let valLabel = '';
         if (!isZero) {
@@ -2279,16 +2402,91 @@ $htmlTemplate = @'
 
       const activityMap = {};
       if (chartMetric === 'downloads') {
+        // Group historical snapshots by calendar day (taking the latest snapshot for each date)
+        const dailySnapshots = {};
+        const sortedHist = [...historyData].sort((a, b) => new Date(a.timestamp) - new Date(b.timestamp));
+        sortedHist.forEach(s => {
+          const dt = (s.timestamp || '').substring(0, 10);
+          if (dt) dailySnapshots[dt] = s;
+        });
+
+        const dailyDeltas = {};
+        const recordedRepoDeltas = {};
+        let recordedCombinedDelta = 0;
+
+        const sortedDays = Object.keys(dailySnapshots).sort();
+        for (let i = 1; i < sortedDays.length; i++) {
+          const prevDay = sortedDays[i - 1];
+          const currDay = sortedDays[i];
+          const prev = dailySnapshots[prevDay];
+          const curr = dailySnapshots[currDay];
+
+          const cDelta = Math.max(0, (curr.totalDownloads || 0) - (prev.totalDownloads || 0));
+          if (!dailyDeltas[currDay]) dailyDeltas[currDay] = { combined: 0, byRepo: {} };
+          dailyDeltas[currDay].combined += cDelta;
+          recordedCombinedDelta += cDelta;
+
+          if (Array.isArray(curr.repos)) {
+            curr.repos.forEach(cr => {
+              const rName = (cr.Name || '').toLowerCase();
+              const pr = Array.isArray(prev.repos) ? prev.repos.find(r => (r.Name || '').toLowerCase() === rName) : null;
+              const prevDl = pr ? (pr.Downloads || 0) : 0;
+              const rDelta = Math.max(0, (cr.Downloads || 0) - prevDl);
+              if (rDelta > 0) {
+                dailyDeltas[currDay].byRepo[rName] = (dailyDeltas[currDay].byRepo[rName] || 0) + rDelta;
+                recordedRepoDeltas[rName] = (recordedRepoDeltas[rName] || 0) + rDelta;
+              }
+            });
+          }
+        }
+
         if (chartRepo === 'combined') {
-          cumulativeYearData.forEach(d => {
-            activityMap[d.date] = (activityMap[d.date] || 0) + (d.dayDownloads || 0);
+          // Add release packages baseline
+          allReleases.forEach(r => {
+            if (r.date) {
+              activityMap[r.date] = (activityMap[r.date] || 0) + (r.downloads || 0);
+            }
+          });
+          // Rebalance: deduct recorded deltas from earliest publish dates so total matches exact all-time
+          let remainingToDeduct = recordedCombinedDelta;
+          Object.keys(activityMap).sort().forEach(dt => {
+            if (remainingToDeduct <= 0) return;
+            const deduct = Math.min(activityMap[dt], remainingToDeduct);
+            activityMap[dt] -= deduct;
+            remainingToDeduct -= deduct;
+          });
+          // Add actual daily download activity on the days they occurred
+          Object.keys(dailyDeltas).forEach(dt => {
+            if (dailyDeltas[dt].combined > 0) {
+              activityMap[dt] = (activityMap[dt] || 0) + dailyDeltas[dt].combined;
+            }
           });
         } else {
-          allReleases
-            .filter(r => r.repo.toLowerCase() === chartRepo.toLowerCase())
-            .forEach(r => {
+          // Single repository
+          const targetRepo = chartRepo.toLowerCase();
+          const repoReleases = allReleases.filter(r => (r.repo || '').toLowerCase() === targetRepo);
+          repoReleases.forEach(r => {
+            if (r.date) {
               activityMap[r.date] = (activityMap[r.date] || 0) + (r.downloads || 0);
-            });
+            }
+          });
+
+          // Rebalance baseline
+          let remainingToDeduct = recordedRepoDeltas[targetRepo] || 0;
+          Object.keys(activityMap).sort().forEach(dt => {
+            if (remainingToDeduct <= 0) return;
+            const deduct = Math.min(activityMap[dt], remainingToDeduct);
+            activityMap[dt] -= deduct;
+            remainingToDeduct -= deduct;
+          });
+
+          // Add actual daily download activity on the days they occurred
+          Object.keys(dailyDeltas).forEach(dt => {
+            const rDelta = (dailyDeltas[dt].byRepo && dailyDeltas[dt].byRepo[targetRepo]) || 0;
+            if (rDelta > 0) {
+              activityMap[dt] = (activityMap[dt] || 0) + rDelta;
+            }
+          });
         }
       } else {
         if (chartRepo === 'combined') {
@@ -2297,10 +2495,14 @@ $htmlTemplate = @'
             activityMap[d.date] = val;
           });
         } else {
-          const repoData = byRepoDaily[chartRepo] || {};
-          Object.keys(repoData).forEach(dt => {
-            const val = chartMetric === 'views' ? (repoData[dt].views || 0) : (repoData[dt].uniques || 0);
-            activityMap[dt] = val;
+          cumulativeYearData.forEach(d => {
+            const val = getRepoDayVal(d, chartRepo, chartMetric);
+            if (val > 0) activityMap[d.date] = val;
+          });
+          const repoDaily = getByRepoDaily(chartRepo) || {};
+          Object.keys(repoDaily).forEach(dt => {
+            const val = chartMetric === 'views' ? (repoDaily[dt].views || 0) : (repoDaily[dt].uniques || 0);
+            if (val > 0 && !activityMap[dt]) activityMap[dt] = val;
           });
         }
       }
@@ -2646,9 +2848,11 @@ $htmlTemplate = @'
       const starRate = Math.min(100, ((totalStars / totalVisitors) * 100)).toFixed(1);
       const dlMultiplier = (totalDownloads / totalVisitors).toFixed(1);
 
-      const botPullsTotal = Math.max(0, total14dClones - total14dUniqueClones);
-      const botPercentTotal = total14dClones > 0 ? Math.round((botPullsTotal / total14dClones) * 100) : 0;
-      const humanCloneRate = Math.min(100, ((total14dUniqueClones / total14dViews) * 100)).toFixed(1);
+      const totalGitPulls = Math.max(total14dClones, total14dUniqueClones);
+      const humanPulls = total14dUniqueClones;
+      const botPullsTotal = Math.max(0, totalGitPulls - humanPulls);
+      const humanPercent = totalGitPulls > 0 ? Math.round((humanPulls / totalGitPulls) * 100) : 100;
+      const botPercent = 100 - humanPercent;
 
       const isDevPersona = total14dClones >= totalDownloads;
       const personaTitle = isDevPersona ? 'Developer & Infra' : 'Consumer Utility';
@@ -2680,15 +2884,15 @@ $htmlTemplate = @'
             <span class="funnel-card-label">Developer Cloners</span>
             <span class="funnel-pill" style="background: rgba(56, 189, 248, 0.15); color: #38bdf8;">&#x1F464; Human Intent</span>
           </div>
-          <div class="funnel-card-val" style="color: #38bdf8;">${total14dUniqueClones} <span style="font-size: 0.95rem; font-weight: 600; color: #94a3b8;">devs (${humanCloneRate}%)</span></div>
-          <div class="funnel-card-formula">${total14dUniqueClones} unique machines &divide; ${total14dViews} views (14d)</div>
-          <p class="funnel-card-desc">Distinct developers or machines that pulled the codebase to build or inspect locally.</p>
+          <div class="funnel-card-val" style="color: #38bdf8;">${humanPulls} <span style="font-size: 0.95rem; font-weight: 600; color: #94a3b8;">devs (${humanPercent}% human)</span></div>
+          <div class="funnel-card-formula">${humanPulls} unique machines out of ${totalGitPulls} git pulls (14d)</div>
+          <p class="funnel-card-desc">Distinct developers or client machines pulling codebase locally (${humanPercent}% human vs ${botPercent}% automated).</p>
         </div>
 
         <div class="funnel-card">
           <div class="funnel-card-header">
             <span class="funnel-card-label">Robot &amp; CI Filter</span>
-            <span class="funnel-pill" style="background: rgba(248, 113, 113, 0.15); color: #f87171;">&#x1F916; ${botPercentTotal}% Automated</span>
+            <span class="funnel-pill" style="background: rgba(248, 113, 113, 0.15); color: #f87171;">&#x1F916; ${botPercent}% Automated</span>
           </div>
           <div class="funnel-card-val" style="color: #f87171;">${botPullsTotal} <span style="font-size: 0.95rem; font-weight: 600; color: #94a3b8;">auto pulls</span></div>
           <div class="funnel-card-formula">${botPullsTotal} repeat cron/CI syncs filtered</div>
@@ -2707,38 +2911,24 @@ $htmlTemplate = @'
       `;
 
       flow.innerHTML = `
-        <div class="funnel-stage">
-          <div class="stage-pill" style="border: 1px solid rgba(56, 189, 248, 0.3); color: #bae6fd;">
-            &#x1F441;&#xFE0F; <strong>${totalVisitors}</strong> Visitors (100%)
-          </div>
+        <div class="stage-pill pill-visitors" title="Total unique visitors: ${totalVisitors}">
+          &#x1F441;&#xFE0F; <strong>${totalVisitors}</strong> Visitors (100%)
         </div>
-        <span class="funnel-arrow">&xrarr;</span>
 
-        <div class="funnel-stage">
-          <div class="stage-pill" style="border: 1px solid rgba(56, 189, 248, 0.3); color: #38bdf8;" title="Devs: ${total14dUniqueClones} unique client IPs or user accounts that cloned repositories via git in the last 14 days">
-            &#x1F464; <strong>${total14dUniqueClones}</strong> Devs (${humanCloneRate}%)
-          </div>
+        <div class="stage-pill pill-devs" title="${humanPulls} unique client machines (${humanPercent}% human intent out of ${totalGitPulls} total git pulls)">
+          &#x1F464; <strong>${humanPulls}</strong> Devs (${humanPercent}% human)
         </div>
-        <span class="funnel-arrow">&xrarr;</span>
 
-        <div class="funnel-stage">
-          <div class="stage-pill" style="border: 1px solid rgba(52, 211, 153, 0.3); color: #34d399;" title="Release Downloads">
-            &#x1F4E5; <strong>${totalDownloads}</strong> Downloads (${dlMultiplier}x)
-          </div>
+        <div class="stage-pill pill-downloads" title="Release Downloads: ${totalDownloads} packages total (${dlMultiplier}x adoption per visitor)">
+          &#x1F4E5; <strong>${totalDownloads}</strong> Downloads (${dlMultiplier}x)
         </div>
-        <span class="funnel-arrow">&xrarr;</span>
 
-        <div class="funnel-stage">
-          <div class="stage-pill" style="border: 1px solid rgba(251, 191, 36, 0.3); color: #fbbf24;" title="Stars Bookmarked">
-            &#x2B50; <strong>${totalStars}</strong> Stars (${starRate}%)
-          </div>
+        <div class="stage-pill pill-stars" title="Stars: ${totalStars} total stars (${starRate}% conversion rate)">
+          &#x2B50; <strong>${totalStars}</strong> Stars (${starRate}%)
         </div>
-        <span class="funnel-arrow">&xrarr;</span>
 
-        <div class="funnel-stage">
-          <div class="stage-pill" style="border: 1px solid rgba(248, 113, 113, 0.3); color: #f87171;" title="Robot Filter: Automated repeat syncs">
-            &#x1F916; <strong>${botPullsTotal}</strong> Bot/Cron Pulls (${botPercentTotal}% auto)
-          </div>
+        <div class="stage-pill pill-bots" title="Automated repeat git pulls filtered from human stats: ${botPullsTotal} pulls (${botPercent}%)">
+          &#x1F916; <strong>${botPullsTotal}</strong> Bots (${botPercent}% auto)
         </div>
       `;
     }
